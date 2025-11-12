@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
+import { tagDB, todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
 import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
 
 const REMINDER_OPTIONS = new Set([15, 30, 60, 120, 1440, 2880, 10080]);
@@ -19,8 +19,9 @@ export async function GET() {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const todos = todoDB.listByUser(session.userId);
-  return NextResponse.json({ todos });
+  const todos = todoDB.listWithRelations(session.userId);
+  const tags = tagDB.listByUser(session.userId);
+  return NextResponse.json({ todos, tags, userId: session.userId });
 }
 
 export async function POST(request: NextRequest) {
@@ -125,5 +126,9 @@ export async function POST(request: NextRequest) {
     reminderMinutes: finalReminder
   });
 
-  return NextResponse.json({ todo }, { status: 201 });
+  const tags = tagDB.listByUser(session.userId);
+  return NextResponse.json({
+    todo: { ...todo, subtasks: [], tagIds: [] },
+    tags
+  }, { status: 201 });
 }

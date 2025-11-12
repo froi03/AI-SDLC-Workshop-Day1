@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, FormEvent } from 'react';
 import { DateTime } from 'luxon';
-import type { Priority, RecurrencePattern, Todo } from '@/lib/db';
+import type { Priority, RecurrencePattern, Subtask, Tag, Todo } from '@/lib/db';
 import { formatSingaporeDate, getSingaporeNow } from '@/lib/timezone';
 
 const priorityOptions: Priority[] = ['high', 'medium', 'low'];
@@ -38,6 +38,98 @@ interface UiState {
 
 type PriorityFilter = 'all' | Priority;
 
+type CompletionFilter = 'all' | 'completed' | 'incomplete';
+
+interface FilterState {
+  search: string;
+  priority: PriorityFilter;
+  tagId: number | 'all';
+  completion: CompletionFilter;
+  dueFrom: string;
+  dueTo: string;
+}
+
+interface FilterPreset {
+  id: string;
+  name: string;
+  state: FilterState;
+}
+
+type ClientTodo = Todo & { subtasks: Subtask[]; tagIds: number[] };
+
+const DEFAULT_FILTERS: FilterState = {
+  search: '',
+  priority: 'all',
+  tagId: 'all',
+  completion: 'all',
+  dueFrom: '',
+  dueTo: ''
+};
+
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+
+function parseFilenameFromDisposition(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const utfMatch = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch && utfMatch[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1]);
+    } catch {
+      return utfMatch[1];
+    }
+  }
+
+  const asciiMatch = value.match(/filename="?([^";]+)"?/i);
+  if (asciiMatch && asciiMatch[1]) {
+    return asciiMatch[1];
+  }
+
+  return null;
+}
+
+function createDefaultFilters(): FilterState {
+  return { ...DEFAULT_FILTERS };
+}
+
+function areFiltersActive(filters: FilterState): boolean {
+  return (
+    filters.search.trim().length > 0 ||
+    filters.priority !== 'all' ||
+    filters.tagId !== 'all' ||
+    filters.completion !== 'all' ||
+    filters.dueFrom !== '' ||
+    filters.dueTo !== ''
+  );
+}
+
+function normalizeFilterState(state?: Partial<FilterState>): FilterState {
+  if (!state) {
+    return createDefaultFilters();
+  }
+
+  const priorityValue = state.priority;
+  const completionValue = state.completion;
+  const tagValue = state.tagId;
+
+  return {
+    search: typeof state.search === 'string' ? state.search : '',
+    priority:
+      priorityValue === 'all' || isPriorityValue(priorityValue)
+        ? (priorityValue ?? 'all')
+        : 'all',
+    tagId: typeof tagValue === 'number' && Number.isFinite(tagValue) ? tagValue : 'all',
+    completion:
+      completionValue === 'completed' || completionValue === 'incomplete'
+        ? completionValue
+        : 'all',
+    dueFrom: typeof state.dueFrom === 'string' ? state.dueFrom : '',
+    dueTo: typeof state.dueTo === 'string' ? state.dueTo : ''
+  };
+}
+
 const INITIAL_FORM: CreateTodoForm = {
   title: '',
   description: '',
@@ -52,7 +144,7 @@ function normalizePriority(priority: unknown): Priority {
   return priority === 'high' || priority === 'medium' || priority === 'low' ? priority : 'medium';
 }
 
-function normalizeTodoPriority(todo: Todo): Todo {
+function normalizeTodoPriority<T extends Todo>(todo: T): T {
   return {
     ...todo,
     priority: normalizePriority(todo.priority)
@@ -85,11 +177,11 @@ function toDatetimeLocal(value: string | null): string {
   return dt.toFormat("yyyy-LL-dd'T'HH:mm");
 }
 
-function groupTodos(todos: Todo[]) {
+function groupTodos<T extends Todo>(todos: T[]) {
   const now = getSingaporeNow();
-  const overdue: Todo[] = [];
-  const active: Todo[] = [];
-  const completed: Todo[] = [];
+  const overdue: T[] = [];
+  const active: T[] = [];
+  const completed: T[] = [];
 
   for (const todo of todos) {
     if (todo.isCompleted) {
@@ -155,13 +247,118 @@ function singaporeNowUtcIso(): string {
 }
 
 export default function TodoPage() {
-  const [todos, setTodos] = useState<Todo[]>([]);
+  const [todos, setTodos] = useState<ClientTodo[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [uiState, setUiState] = useState<UiState>({ loading: true, error: null });
   const [createForm, setCreateForm] = useState<CreateTodoForm>(INITIAL_FORM);
-  const [editing, setEditing] = useState<Todo | null>(null);
+  const [editing, setEditing] = useState<ClientTodo | null>(null);
   const [editErrors, setEditErrors] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
+  const [filters, setFilters] = useState<FilterState>(() => createDefaultFilters());
+  const [searchValue, setSearchValue] = useState('');
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [presetsAvailable, setPresetsAvailable] = useState(true);
+  const [showSavePresetModal, setShowSavePresetModal] = useState(false);
+  const [newPresetName, setNewPresetName] = useState('');
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const skipPresetClearRef = useRef(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const updateFiltersPartial = useCallback((updates: Partial<FilterState>) => {
+    setFilters((prev) => ({ ...prev, ...updates }));
+    setActivePresetId(null);
+  }, []);
+
+  const handleClearFilters = useCallback(() => {
+    setFilters(createDefaultFilters());
+    setSearchValue('');
+    setActivePresetId(null);
+  }, []);
+
+  const applyPresetState = useCallback((preset: FilterPreset) => {
+    const normalized = normalizeFilterState(preset.state);
+    skipPresetClearRef.current = true;
+    setFilters(() => ({ ...normalized }));
+    setSearchValue(normalized.search);
+    setActivePresetId(preset.id);
+    if (normalized.completion !== 'all' || normalized.dueFrom !== '' || normalized.dueTo !== '') {
+      setIsAdvancedOpen(true);
+    }
+  }, []);
+
+  const handleDeletePreset = useCallback(
+    (presetId: string) => {
+      setFilterPresets((prev) => prev.filter((preset) => preset.id !== presetId));
+      if (activePresetId === presetId) {
+        setActivePresetId(null);
+      }
+    },
+    [activePresetId]
+  );
+
+  const handleOpenSavePreset = useCallback(() => {
+    setPresetError(null);
+    setNewPresetName('');
+    setShowSavePresetModal(true);
+  }, []);
+
+  const handleSavePreset = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      if (!presetsAvailable) {
+        setPresetError('Filter presets are unavailable in this browser.');
+        return;
+      }
+
+      const trimmed = newPresetName.trim();
+      if (!trimmed) {
+        setPresetError('Preset name is required');
+        return;
+      }
+
+      if (filterPresets.some((preset) => preset.name.toLowerCase() === trimmed.toLowerCase())) {
+        setPresetError('Preset name must be unique');
+        return;
+      }
+
+      const state = normalizeFilterState({ ...filters, search: searchValue });
+      const preset: FilterPreset = {
+        id:
+          typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function'
+            ? globalThis.crypto.randomUUID()
+            : `preset-${Date.now()}`,
+        name: trimmed,
+        state
+      };
+
+      setFilterPresets((prev) => [...prev, preset]);
+      skipPresetClearRef.current = true;
+      setFilters(() => ({ ...state }));
+      setSearchValue(state.search);
+      setActivePresetId(preset.id);
+      setShowSavePresetModal(false);
+      setNewPresetName('');
+      setPresetError(null);
+    },
+    [filterPresets, filters, newPresetName, presetsAvailable, searchValue]
+  );
+
+  const filtersActive = useMemo(() => areFiltersActive({ ...filters, search: searchValue }), [filters, searchValue]);
+  const advancedFiltersActive = filters.completion !== 'all' || filters.dueFrom !== '' || filters.dueTo !== '';
+  const tagMap = useMemo(() => {
+    const map = new Map<number, Tag>();
+    for (const tag of tags) {
+      map.set(tag.id, tag);
+    }
+    return map;
+  }, [tags]);
 
   const loadTodos = useCallback(async () => {
     setUiState((prev) => ({ ...prev, loading: true }));
@@ -170,9 +367,16 @@ export default function TodoPage() {
       if (!response.ok) {
         throw new Error('Failed to load todos');
       }
-      const data = (await response.json()) as { todos?: Todo[] };
-      const fetched = Array.isArray(data.todos) ? (data.todos as Todo[]) : [];
-      setTodos(fetched.map(normalizeTodoPriority));
+      const data = (await response.json()) as {
+        todos?: ClientTodo[];
+        tags?: Tag[];
+        userId?: number;
+      };
+      const fetched = Array.isArray(data.todos) ? data.todos : [];
+      setTodos(fetched.map((todo) => normalizeTodoPriority(todo)));
+      setTags(Array.isArray(data.tags) ? data.tags : []);
+      const resolvedUserId = typeof data.userId === 'number' ? data.userId : fetched[0]?.userId ?? null;
+      setCurrentUserId(resolvedUserId ?? null);
       setUiState({ loading: false, error: null });
     } catch (error) {
       setUiState({ loading: false, error: (error as Error).message });
@@ -183,12 +387,227 @@ export default function TodoPage() {
     loadTodos();
   }, [loadTodos]);
 
-  const filteredTodos = useMemo(() => {
-    if (priorityFilter === 'all') {
-      return todos;
+  const handleExport = useCallback(async () => {
+    setIsExporting(true);
+    try {
+      const response = await fetch('/api/todos/export');
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? 'Failed to export todos');
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const filename = parseFilenameFromDisposition(response.headers.get('Content-Disposition')) ?? 'todos-export.json';
+
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+
+      setBanner({ type: 'success', text: 'Export completed successfully.' });
+    } catch (error) {
+      setBanner({ type: 'error', text: (error as Error).message ?? 'Failed to export todos' });
+    } finally {
+      setIsExporting(false);
     }
-    return todos.filter((todo) => todo.priority === priorityFilter);
-  }, [todos, priorityFilter]);
+  }, []);
+
+  const handleImportClick = useCallback(() => {
+    importInputRef.current?.click();
+  }, []);
+
+  const handleImportFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) {
+        return;
+      }
+
+      if (file.size > MAX_IMPORT_BYTES) {
+        setBanner({ type: 'error', text: 'Import file exceeds 5 MB limit.' });
+        event.target.value = '';
+        return;
+      }
+
+      setIsImporting(true);
+
+      try {
+        const fileContents = await file.text();
+
+        try {
+          JSON.parse(fileContents);
+        } catch (error) {
+          throw new Error('Selected file is not valid JSON.');
+        }
+
+        const response = await fetch('/api/todos/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: fileContents
+        });
+
+        if (!response.ok) {
+          const data = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(data?.error ?? 'Failed to import todos');
+        }
+
+        const result = (await response.json()) as {
+          importedTodos?: number;
+          importedSubtasks?: number;
+          importedTags?: number;
+          reusedTags?: number;
+        };
+
+        setBanner({
+          type: 'success',
+          text: `Imported ${result.importedTodos ?? 0} todos and ${result.importedSubtasks ?? 0} subtasks (${result.importedTags ?? 0} tags created, ${result.reusedTags ?? 0} reused).`
+        });
+
+        await loadTodos();
+      } catch (error) {
+        setBanner({ type: 'error', text: (error as Error).message ?? 'Failed to import todos' });
+      } finally {
+        setIsImporting(false);
+        event.target.value = '';
+      }
+    },
+    [loadTodos]
+  );
+
+  const presetStorageKey = useMemo(
+    () => (currentUserId != null ? `todo-filter-presets-${currentUserId}` : 'todo-filter-presets-guest'),
+    [currentUserId]
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(presetStorageKey);
+      if (!raw) {
+        setFilterPresets([]);
+        setPresetsAvailable(true);
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as FilterPreset[] | undefined;
+      if (Array.isArray(parsed)) {
+        setFilterPresets(parsed.map((preset) => ({ ...preset, state: normalizeFilterState(preset.state) })));
+      } else {
+        setFilterPresets([]);
+      }
+      setPresetsAvailable(true);
+    } catch (error) {
+      console.warn('Failed to read filter presets from localStorage', error);
+      setPresetsAvailable(false);
+      setFilterPresets([]);
+    }
+  }, [presetStorageKey]);
+
+  useEffect(() => {
+    if (!presetsAvailable || typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(presetStorageKey, JSON.stringify(filterPresets));
+    } catch (error) {
+      console.warn('Failed to persist filter presets', error);
+      setPresetsAvailable(false);
+    }
+  }, [filterPresets, presetStorageKey, presetsAvailable]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      let changed = false;
+      setFilters((prev) => {
+        if (prev.search === searchValue) {
+          return prev;
+        }
+        changed = true;
+        return { ...prev, search: searchValue };
+      });
+
+      if (!changed) {
+        return;
+      }
+
+      if (skipPresetClearRef.current) {
+        skipPresetClearRef.current = false;
+      } else {
+        setActivePresetId(null);
+      }
+    }, 300);
+
+    return () => window.clearTimeout(handle);
+  }, [searchValue]);
+
+  useEffect(() => {
+    setSearchValue(filters.search);
+  }, [filters.search]);
+
+  const filteredTodos = useMemo(() => {
+    const term = filters.search.trim().toLowerCase();
+    const hasTerm = term.length > 0;
+
+    const fromDate = filters.dueFrom
+      ? DateTime.fromISO(filters.dueFrom, { zone: 'Asia/Singapore' }).startOf('day')
+      : null;
+    const toDate = filters.dueTo
+      ? DateTime.fromISO(filters.dueTo, { zone: 'Asia/Singapore' }).endOf('day')
+      : null;
+
+    return todos.filter((todo) => {
+      if (hasTerm) {
+        const inTitle = todo.title.toLowerCase().includes(term);
+        const inDescription = todo.description?.toLowerCase().includes(term) ?? false;
+        const inSubtasks = todo.subtasks.some((subtask) => subtask.title.toLowerCase().includes(term));
+        if (!inTitle && !inDescription && !inSubtasks) {
+          return false;
+        }
+      }
+
+      if (filters.priority !== 'all' && todo.priority !== filters.priority) {
+        return false;
+      }
+
+      if (filters.tagId !== 'all' && !todo.tagIds.includes(filters.tagId)) {
+        return false;
+      }
+
+      if (filters.completion === 'completed' && !todo.isCompleted) {
+        return false;
+      }
+
+      if (filters.completion === 'incomplete' && todo.isCompleted) {
+        return false;
+      }
+
+      if (fromDate || toDate) {
+        if (!todo.dueDate) {
+          return false;
+        }
+        const due = DateTime.fromISO(todo.dueDate).setZone('Asia/Singapore');
+        if (!due.isValid) {
+          return false;
+        }
+        if (fromDate && due < fromDate) {
+          return false;
+        }
+        if (toDate && due > toDate) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [todos, filters]);
 
   const sections = useMemo(() => groupTodos(filteredTodos), [filteredTodos]);
 
@@ -213,7 +632,7 @@ export default function TodoPage() {
 
     const optimisticTimestamp = singaporeNowUtcIso();
 
-    const optimisticTodo: Todo = {
+    const optimisticTodo: ClientTodo = {
       id: Math.max(0, ...todos.map((todo) => todo.id)) + 1,
       userId: 1,
       title: payload.title,
@@ -226,7 +645,9 @@ export default function TodoPage() {
       recurrencePattern: payload.recurrencePattern,
       reminderMinutes: payload.reminderMinutes,
       createdAt: optimisticTimestamp,
-      updatedAt: optimisticTimestamp
+      updatedAt: optimisticTimestamp,
+      subtasks: [],
+      tagIds: []
     };
 
     setTodos((prev) => [optimisticTodo, ...prev]);
@@ -243,7 +664,10 @@ export default function TodoPage() {
         throw new Error(data.error ?? 'Failed to create todo');
       }
 
-      const data = (await response.json()) as { todo: Todo };
+      const data = (await response.json()) as { todo: ClientTodo; tags?: Tag[] };
+      if (Array.isArray(data.tags)) {
+        setTags(data.tags);
+      }
       setTodos((prev) => [
         normalizeTodoPriority(data.todo),
         ...prev.filter((todo) => todo.id !== optimisticTodo.id)
@@ -255,8 +679,8 @@ export default function TodoPage() {
     }
   };
 
-  const handleToggle = async (todo: Todo) => {
-    const updated: Todo = {
+  const handleToggle = async (todo: ClientTodo) => {
+    const updated: ClientTodo = {
       ...todo,
       isCompleted: !todo.isCompleted,
       completedAt: todo.isCompleted ? null : singaporeNowUtcIso()
@@ -274,7 +698,10 @@ export default function TodoPage() {
         throw new Error('Failed to update todo');
       }
 
-      const data = (await response.json()) as { todo: Todo; nextTodo?: Todo };
+      const data = (await response.json()) as { todo: ClientTodo; nextTodo?: ClientTodo; tags?: Tag[] };
+      if (Array.isArray(data.tags)) {
+        setTags(data.tags);
+      }
       setTodos((prev) => {
         const normalizedCurrent = normalizeTodoPriority(data.todo);
         let nextState = prev.map((item) => (item.id === todo.id ? normalizedCurrent : item));
@@ -297,7 +724,7 @@ export default function TodoPage() {
     }
   };
 
-  const handleDelete = async (todo: Todo) => {
+  const handleDelete = async (todo: ClientTodo) => {
     const current = todos;
     setTodos((prev) => prev.filter((item) => item.id !== todo.id));
 
@@ -312,7 +739,7 @@ export default function TodoPage() {
     }
   };
 
-  const openEdit = (todo: Todo) => {
+  const openEdit = (todo: ClientTodo) => {
     setEditing(todo);
     setEditErrors(null);
   };
@@ -363,7 +790,7 @@ export default function TodoPage() {
         throw new Error(data.error ?? 'Failed to update todo');
       }
 
-  const data = (await response.json()) as { todo: Todo };
+  const data = (await response.json()) as { todo: ClientTodo };
   setTodos((prev) => prev.map((item) => (item.id === editing.id ? normalizeTodoPriority(data.todo) : item)));
       closeEdit();
     } catch (error) {
@@ -374,10 +801,57 @@ export default function TodoPage() {
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-8 px-6 py-12">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-3xl font-semibold">Todo Dashboard</h1>
-        <p className="text-sm text-slate-300">All times in Singapore timezone (Asia/Singapore).</p>
+      <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-2">
+          <h1 className="text-3xl font-semibold">Todo Dashboard</h1>
+          <p className="text-sm text-slate-300">All times in Singapore timezone (Asia/Singapore).</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={isExporting}
+            className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-100 transition-colors hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isExporting ? 'Exporting...' : 'Export JSON'}
+          </button>
+          <button
+            type="button"
+            onClick={handleImportClick}
+            disabled={isImporting}
+            className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-100 transition-colors hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isImporting ? 'Importing...' : 'Import JSON'}
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json"
+            className="hidden"
+            onChange={handleImportFile}
+          />
+        </div>
       </header>
+
+      {banner && (
+        <div
+          className={`flex items-start justify-between gap-4 rounded border px-4 py-3 text-sm shadow ${
+            banner.type === 'success'
+              ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-100'
+              : 'border-red-500/60 bg-red-500/10 text-red-100'
+          }`}
+        >
+          <span>{banner.text}</span>
+          <button
+            type="button"
+            onClick={() => setBanner(null)}
+            className="rounded px-2 py-1 text-xs text-slate-200 hover:bg-slate-200/10"
+            aria-label="Dismiss notification"
+          >
+            Close
+          </button>
+        </div>
+      )}
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
         <h2 className="text-xl font-semibold">Create Todo</h2>
@@ -532,39 +1006,208 @@ export default function TodoPage() {
       </section>
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
-        <h2 className="text-xl font-semibold">Filters</h2>
-        <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-end">
-          <div className="flex flex-1 flex-col gap-2">
-            <label className="text-sm font-medium" htmlFor="priorityFilter">
-              Priority Filter
+        <h2 className="text-xl font-semibold">Search &amp; Filters</h2>
+        <div className="mt-4 flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <label className="text-sm font-medium" htmlFor="filter-search">
+              Search
             </label>
-            <select
-              id="priorityFilter"
-              value={priorityFilter}
-              onChange={(event) => {
-                const value = event.target.value;
-                setPriorityFilter(value === 'all' ? 'all' : normalizePriority(value));
-              }}
-              className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
-              aria-label="Filter todos by priority"
-            >
-              <option value="all">All priorities</option>
-              {priorityOptions.map((option) => (
-                <option key={option} value={option}>
-                  {priorityLabels[option]}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <input
+                id="filter-search"
+                type="search"
+                value={searchValue}
+                onChange={(event) => {
+                  setSearchValue(event.target.value);
+                  if (activePresetId) {
+                    setActivePresetId(null);
+                  }
+                }}
+                placeholder="Search todos and subtasks..."
+                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 pr-10 text-slate-100"
+                aria-label="Search todos and subtasks"
+              />
+              {searchValue && (
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200"
+                  onClick={() => setSearchValue('')}
+                  aria-label="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
 
-          {priorityFilter !== 'all' && (
-            <button
-              type="button"
-              className="self-start rounded border border-slate-700 px-4 py-2 text-sm"
-              onClick={() => setPriorityFilter('all')}
+          <div className="flex flex-col gap-3 md:flex-row md:items-end">
+            <div className="flex flex-1 flex-col gap-2">
+              <label className="text-sm font-medium" htmlFor="filter-priority">
+                Priority
+              </label>
+              <select
+                id="filter-priority"
+                value={filters.priority}
+                onChange={(event) => updateFiltersPartial({
+                  priority: event.target.value === 'all' ? 'all' : normalizePriority(event.target.value)
+                })}
+                className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+              >
+                <option value="all">All priorities</option>
+                {priorityOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {priorityLabels[option]}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {tags.length > 0 && (
+              <div className="flex flex-1 flex-col gap-2">
+                <label className="text-sm font-medium" htmlFor="filter-tag">
+                  Tag
+                </label>
+                <select
+                  id="filter-tag"
+                  value={filters.tagId}
+                  onChange={(event) => updateFiltersPartial({
+                    tagId: event.target.value === 'all' ? 'all' : Number.parseInt(event.target.value, 10) || 'all'
+                  })}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                >
+                  <option value="all">All tags</option>
+                  {tags.map((tag) => (
+                    <option key={tag.id} value={tag.id}>
+                      {tag.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 md:ml-auto">
+              <button
+                type="button"
+                onClick={() => setIsAdvancedOpen((prev) => !prev)}
+                className={`rounded border px-4 py-2 text-sm transition-colors ${
+                  isAdvancedOpen || advancedFiltersActive
+                    ? 'border-blue-500/60 bg-blue-500/10 text-blue-200'
+                    : 'border-slate-700 text-slate-200 hover:border-slate-500'
+                }`}
+                aria-expanded={isAdvancedOpen}
+                aria-controls="advanced-filters"
+              >
+                {isAdvancedOpen ? '▼ Advanced' : '▶ Advanced'}
+              </button>
+            </div>
+          </div>
+
+          {filtersActive && (
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                className="rounded border border-red-500 px-4 py-2 text-sm text-red-200 transition-colors hover:bg-red-500/10"
+                onClick={handleClearFilters}
+              >
+                Clear All
+              </button>
+              {presetsAvailable ? (
+                <button
+                  type="button"
+                  className="rounded border border-emerald-500 px-4 py-2 text-sm text-emerald-200 transition-colors hover:bg-emerald-500/10"
+                  onClick={handleOpenSavePreset}
+                >
+                  Save Filter
+                </button>
+              ) : (
+                <span className="text-xs text-slate-400">Filter presets unavailable (private browsing mode).</span>
+              )}
+            </div>
+          )}
+
+          {isAdvancedOpen && (
+            <div
+              id="advanced-filters"
+              className="flex flex-col gap-4 rounded border border-slate-800 bg-slate-950/40 p-4"
             >
-              Clear priority filter
-            </button>
+              <div className="flex flex-col gap-4 md:flex-row md:items-end">
+                <div className="flex flex-1 flex-col gap-2">
+                  <label className="text-sm font-medium" htmlFor="filter-completion">
+                    Completion
+                  </label>
+                  <select
+                    id="filter-completion"
+                    value={filters.completion}
+                    onChange={(event) => updateFiltersPartial({
+                      completion: event.target.value as CompletionFilter
+                    })}
+                    className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  >
+                    <option value="all">All todos</option>
+                    <option value="incomplete">Incomplete only</option>
+                    <option value="completed">Completed only</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-1 flex-col gap-2">
+                  <label className="text-sm font-medium" htmlFor="filter-due-from">
+                    Due from
+                  </label>
+                  <input
+                    id="filter-due-from"
+                    type="date"
+                    value={filters.dueFrom}
+                    onChange={(event) => updateFiltersPartial({ dueFrom: event.target.value })}
+                    className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  />
+                </div>
+
+                <div className="flex flex-1 flex-col gap-2">
+                  <label className="text-sm font-medium" htmlFor="filter-due-to">
+                    Due to
+                  </label>
+                  <input
+                    id="filter-due-to"
+                    type="date"
+                    value={filters.dueTo}
+                    onChange={(event) => updateFiltersPartial({ dueTo: event.target.value })}
+                    className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  />
+                </div>
+              </div>
+
+              {filterPresets.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs uppercase tracking-wide text-slate-500">Saved presets</span>
+                  {filterPresets.map((preset) => (
+                    <div
+                      key={preset.id}
+                      className={`flex items-center gap-1 rounded border px-3 py-1 text-xs transition-colors ${
+                        activePresetId === preset.id
+                          ? 'border-emerald-500 text-emerald-200'
+                          : 'border-slate-700 text-slate-300 hover:border-slate-500'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        className="font-medium"
+                        onClick={() => applyPresetState(preset)}
+                      >
+                        {preset.name}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded px-1 text-slate-500 hover:text-red-400"
+                        onClick={() => handleDeletePreset(preset.id)}
+                        aria-label={`Delete preset ${preset.name}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </section>
@@ -578,6 +1221,7 @@ export default function TodoPage() {
           description="Tasks past their due date"
           emptyMessage="Nothing overdue — great job!"
           todos={sections.overdue}
+          tagMap={tagMap}
           onToggle={handleToggle}
           onEdit={openEdit}
           onDelete={handleDelete}
@@ -587,6 +1231,7 @@ export default function TodoPage() {
           description="Upcoming and ongoing tasks"
           emptyMessage="No active todos. Time to add some!"
           todos={sections.active}
+          tagMap={tagMap}
           onToggle={handleToggle}
           onEdit={openEdit}
           onDelete={handleDelete}
@@ -596,11 +1241,58 @@ export default function TodoPage() {
           description="Finished tasks"
           emptyMessage="No completed todos yet."
           todos={sections.completed}
+          tagMap={tagMap}
           onToggle={handleToggle}
           onEdit={openEdit}
           onDelete={handleDelete}
         />
       </section>
+
+      {showSavePresetModal && (
+        <dialog open className="fixed inset-0 flex items-center justify-center bg-black/60">
+          <form
+            className="w-full max-w-md rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl"
+            onSubmit={handleSavePreset}
+          >
+            <h2 className="text-xl font-semibold">Save Filter Preset</h2>
+            <p className="mt-2 text-sm text-slate-400">Name this filter combination to reuse it later.</p>
+            <div className="mt-4 flex flex-col gap-2">
+              <label className="text-sm font-medium" htmlFor="preset-name">
+                Preset name
+              </label>
+              <input
+                id="preset-name"
+                value={newPresetName}
+                onChange={(event) => setNewPresetName(event.target.value)}
+                maxLength={60}
+                className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                placeholder="This Week — High Priority"
+                required
+              />
+            </div>
+            {presetError && <p className="mt-2 text-sm text-red-400">{presetError}</p>}
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                className="rounded border border-slate-700 px-4 py-2 text-sm"
+                onClick={() => {
+                  setShowSavePresetModal(false);
+                  setPresetError(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="rounded bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!presetsAvailable}
+              >
+                Save Preset
+              </button>
+            </div>
+          </form>
+        </dialog>
+      )}
 
       {editing && (
         <dialog open className="fixed inset-0 flex items-center justify-center bg-black/60">
@@ -710,13 +1402,14 @@ interface TodoSectionProps {
   title: string;
   description: string;
   emptyMessage: string;
-  todos: Todo[];
-  onToggle: (todo: Todo) => void;
-  onEdit: (todo: Todo) => void;
-  onDelete: (todo: Todo) => void;
+  todos: ClientTodo[];
+  tagMap: Map<number, Tag>;
+  onToggle: (todo: ClientTodo) => void;
+  onEdit: (todo: ClientTodo) => void;
+  onDelete: (todo: ClientTodo) => void;
 }
 
-function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit, onDelete }: TodoSectionProps) {
+function TodoSection({ title, description, emptyMessage, todos, tagMap, onToggle, onEdit, onDelete }: TodoSectionProps) {
   const sectionSlug = toTestIdSegment(title);
   return (
     <section
@@ -759,6 +1452,23 @@ function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit
                       <span>{todo.dueDate ? `Due ${formatSingaporeDate(todo.dueDate)}` : 'No due date'}</span>
                       {todo.isRecurring && todo.recurrencePattern && <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-300">Repeats {todo.recurrencePattern}</span>}
                       {todo.reminderMinutes != null && <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">Reminder {todo.reminderMinutes}m</span>}
+                      {todo.tagIds.length > 0 &&
+                        todo.tagIds.map((tagId) => {
+                          const tag = tagMap.get(tagId);
+                          if (!tag) {
+                            return null;
+                          }
+                          return (
+                            <span
+                              key={tagId}
+                              className="rounded border px-2 py-1"
+                              style={{ borderColor: tag.color, color: tag.color }}
+                              aria-label={`Tag ${tag.name}`}
+                            >
+                              {tag.name}
+                            </span>
+                          );
+                        })}
                     </div>
                   </div>
                 </label>

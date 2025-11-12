@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
+import { tagDB, todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
 import { calculateNextDueDate, getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
 
 const REMINDER_OPTIONS = new Set([15, 30, 60, 120, 1440, 2880, 10080]);
@@ -30,7 +30,7 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
     return NextResponse.json({ error: 'Invalid todo id' }, { status: 400 });
   }
 
-  const todo = todoDB.getById(id, session.userId);
+  const todo = todoDB.getWithRelations(id, session.userId);
   if (!todo) {
     return NextResponse.json({ error: 'Todo not found' }, { status: 404 });
   }
@@ -183,6 +183,10 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   }
 
   const updated = todoDB.update(id, session.userId, updates);
+  const enriched = todoDB.getWithRelations(id, session.userId);
+  if (!enriched) {
+    return NextResponse.json({ error: 'Todo not found after update' }, { status: 500 });
+  }
 
   let nextTodo = null;
   if (transitioningToCompleted && updated.isRecurring && updated.dueDate && updated.recurrencePattern) {
@@ -204,7 +208,19 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     }
   }
 
-  return NextResponse.json({ todo: updated, nextTodo: nextTodo ?? undefined });
+  const response: Record<string, unknown> = {
+    todo: enriched
+  };
+
+  if (nextTodo) {
+    response.nextTodo = { ...nextTodo, subtasks: [], tagIds: [] };
+  }
+
+  if ('priority' in updates || 'dueDate' in updates || 'isCompleted' in updates || 'isRecurring' in updates || 'recurrencePattern' in updates || 'reminderMinutes' in updates) {
+    response.tags = tagDB.listByUser(session.userId);
+  }
+
+  return NextResponse.json(response);
 }
 
 export async function DELETE(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
