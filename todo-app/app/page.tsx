@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { DateTime } from 'luxon';
@@ -266,9 +267,12 @@ export default function TodoPage() {
   const [presetError, setPresetError] = useState<string | null>(null);
   const skipPresetClearRef = useRef(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingCsv, setIsExportingCsv] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
   const updateFiltersPartial = useCallback((updates: Partial<FilterState>) => {
     setFilters((prev) => ({ ...prev, ...updates }));
@@ -387,6 +391,41 @@ export default function TodoPage() {
     loadTodos();
   }, [loadTodos]);
 
+  useEffect(() => {
+    if (!isExportMenuOpen) {
+      return;
+    }
+
+    function handleClick(event: MouseEvent) {
+      const target = event.target as Node;
+      if (exportMenuRef.current && !exportMenuRef.current.contains(target)) {
+        setIsExportMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleClick);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+    };
+  }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    if (!isExportMenuOpen) {
+      return;
+    }
+
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsExportMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [isExportMenuOpen]);
+
   const handleExport = useCallback(async () => {
     setIsExporting(true);
     try {
@@ -413,7 +452,42 @@ export default function TodoPage() {
       setBanner({ type: 'error', text: (error as Error).message ?? 'Failed to export todos' });
     } finally {
       setIsExporting(false);
+      setIsExportMenuOpen(false);
     }
+  }, []);
+
+  const handleExportCsv = useCallback(async () => {
+    setIsExportingCsv(true);
+    try {
+      const response = await fetch('/api/todos/export/csv');
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? 'Failed to export todos as CSV');
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const filename = parseFilenameFromDisposition(response.headers.get('Content-Disposition')) ?? 'todos-export.csv';
+
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+
+      setBanner({ type: 'success', text: 'CSV export completed successfully.' });
+    } catch (error) {
+      setBanner({ type: 'error', text: (error as Error).message ?? 'Failed to export todos as CSV' });
+    } finally {
+      setIsExportingCsv(false);
+      setIsExportMenuOpen(false);
+    }
+  }, []);
+
+  const toggleExportMenu = useCallback(() => {
+    setIsExportMenuOpen((open) => !open);
   }, []);
 
   const handleImportClick = useCallback(() => {
@@ -807,14 +881,45 @@ export default function TodoPage() {
           <p className="text-sm text-slate-300">All times in Singapore timezone (Asia/Singapore).</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={handleExport}
-            disabled={isExporting}
-            className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-100 transition-colors hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
+          <Link
+            href="/calendar"
+            className="rounded border border-blue-500 px-4 py-2 text-sm text-blue-200 transition-colors hover:bg-blue-500/10"
           >
-            {isExporting ? 'Exporting...' : 'Export JSON'}
-          </button>
+            Open Calendar View
+          </Link>
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              type="button"
+              onClick={toggleExportMenu}
+              className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-100 transition-colors hover:border-slate-500"
+              aria-haspopup="menu"
+              aria-expanded={isExportMenuOpen}
+            >
+              Export Data
+            </button>
+            {isExportMenuOpen && (
+              <div className="absolute right-0 z-20 mt-2 w-48 rounded border border-slate-700 bg-slate-900/95 shadow-lg">
+                <button
+                  type="button"
+                  onClick={handleExport}
+                  disabled={isExporting}
+                  className="flex w-full items-center justify-between px-4 py-2 text-left text-sm text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  JSON
+                  {isExporting && <span className="text-xs text-slate-400">Exporting...</span>}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportCsv}
+                  disabled={isExportingCsv}
+                  className="flex w-full items-center justify-between px-4 py-2 text-left text-sm text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  CSV
+                  {isExportingCsv && <span className="text-xs text-slate-400">Exporting...</span>}
+                </button>
+              </div>
+            )}
+          </div>
           <button
             type="button"
             onClick={handleImportClick}

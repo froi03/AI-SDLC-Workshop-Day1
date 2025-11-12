@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { DateTime } from 'luxon';
 import { getSession } from '@/lib/auth';
 import { tagDB, todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
 import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
@@ -13,13 +14,47 @@ function validateRecurrence(pattern: unknown): pattern is RecurrencePattern {
   return pattern === 'daily' || pattern === 'weekly' || pattern === 'monthly' || pattern === 'yearly';
 }
 
-export async function GET() {
+function parseRangeBoundary(value: string, edge: 'start' | 'end'): string {
+  const date = DateTime.fromISO(value, { zone: 'Asia/Singapore' });
+  if (!date.isValid) {
+    throw new Error('Invalid date range filter');
+  }
+
+  const adjusted = edge === 'start' ? date.startOf('day') : date.endOf('day');
+  const iso = adjusted.setZone('utc').toISO();
+  if (!iso) {
+    throw new Error('Invalid date range filter');
+  }
+  return iso;
+}
+
+export async function GET(request: NextRequest) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const todos = todoDB.listWithRelations(session.userId);
+  const searchParams = request.nextUrl.searchParams;
+  const fromParam = searchParams.get('from');
+  const toParam = searchParams.get('to');
+
+  let todos;
+  if (fromParam || toParam) {
+    if (!fromParam || !toParam) {
+      return NextResponse.json({ error: 'Both from and to parameters are required' }, { status: 400 });
+    }
+
+    try {
+      const fromUtc = parseRangeBoundary(fromParam, 'start');
+      const toUtc = parseRangeBoundary(toParam, 'end');
+      todos = todoDB.listWithRelationsInRange(session.userId, fromUtc, toUtc);
+    } catch (error) {
+      return NextResponse.json({ error: (error as Error).message }, { status: 400 });
+    }
+  } else {
+    todos = todoDB.listWithRelations(session.userId);
+  }
+
   const tags = tagDB.listByUser(session.userId);
   return NextResponse.json({ todos, tags, userId: session.userId });
 }

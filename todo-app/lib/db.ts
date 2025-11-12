@@ -77,6 +77,13 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_todo_tags_todo_id ON todo_tags(todo_id);
   CREATE INDEX IF NOT EXISTS idx_todo_tags_tag_id ON todo_tags(tag_id);
+
+  CREATE TABLE IF NOT EXISTS holidays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    name TEXT NOT NULL,
+    UNIQUE (date)
+  );
 `);
 
 const todoColumns = db.prepare(`PRAGMA table_info('todos')`).all() as { name: string }[];
@@ -122,6 +129,12 @@ export interface Tag {
   color: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface Holiday {
+  id: number;
+  date: string;
+  name: string;
 }
 
 export interface Todo {
@@ -216,6 +229,20 @@ function mapTag(row: TagRow): Tag {
   };
 }
 
+type HolidayRow = {
+  id: number;
+  date: string;
+  name: string;
+};
+
+function mapHoliday(row: HolidayRow): Holiday {
+  return {
+    id: row.id,
+    date: row.date,
+    name: row.name
+  };
+}
+
 function singaporeUtcIso(): string {
   const iso = getSingaporeNow().toUTC().toISO();
   if (!iso) {
@@ -227,6 +254,18 @@ function singaporeUtcIso(): string {
 const selectTodos = db.prepare<TodoRow[]>(`SELECT * FROM todos WHERE user_id = ? ORDER BY is_completed ASC, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC, due_date IS NULL ASC, due_date ASC, created_at ASC`);
 
 const selectTodoById = db.prepare<TodoRow | undefined>(`SELECT * FROM todos WHERE id = ? AND user_id = ?`);
+
+const selectTodosInRange = db.prepare<TodoRow[]>(`
+  SELECT *
+  FROM todos
+  WHERE user_id = ?
+    AND due_date IS NOT NULL
+    AND due_date BETWEEN ? AND ?
+  ORDER BY is_completed ASC,
+           CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC,
+           due_date ASC,
+           created_at ASC
+`);
 
 const insertTodo = db.prepare(`
   INSERT INTO todos (
@@ -345,6 +384,22 @@ const insertTodoTagStmt = db.prepare(`
 
 const deleteTodoTagStmt = db.prepare(`DELETE FROM todo_tags WHERE todo_id = ? AND tag_id = ?`);
 
+const selectHolidaysAllStmt = db.prepare<HolidayRow[]>(`SELECT * FROM holidays ORDER BY date ASC`);
+
+const selectHolidaysBetweenStmt = db.prepare<HolidayRow[]>(`
+  SELECT *
+  FROM holidays
+  WHERE date BETWEEN ? AND ?
+  ORDER BY date ASC
+`);
+
+const insertHolidayStmt = db.prepare(`
+  INSERT OR IGNORE INTO holidays (date, name)
+  VALUES (?, ?)
+`);
+
+const deleteHolidayByDateStmt = db.prepare(`DELETE FROM holidays WHERE date = ?`);
+
 export const todoDB = {
   create(args: {
     userId: number;
@@ -422,6 +477,16 @@ export const todoDB = {
 
   listWithRelations(userId: number): Array<Todo & { subtasks: Subtask[]; tagIds: number[] }> {
     return this.listByUser(userId).map((todo) => {
+      const subtasks = this.listSubtasks(todo.id);
+      const tags = this.listTagsForTodo(todo.id);
+      return { ...todo, subtasks, tagIds: tags.map((tag) => tag.id) };
+    });
+  },
+
+  listWithRelationsInRange(userId: number, fromInclusive: string, toInclusive: string): Array<Todo & { subtasks: Subtask[]; tagIds: number[] }> {
+    const rows = selectTodosInRange.all(userId, fromInclusive, toInclusive) as TodoRow[];
+    return rows.map((row) => {
+      const todo = mapTodo(row);
       const subtasks = this.listSubtasks(todo.id);
       const tags = this.listTagsForTodo(todo.id);
       return { ...todo, subtasks, tagIds: tags.map((tag) => tag.id) };
@@ -633,6 +698,26 @@ export const todoTagDB = {
 
   detach(todoId: number, tagId: number): void {
     deleteTodoTagStmt.run(todoId, tagId);
+  }
+};
+
+export const holidayDB = {
+  listAll(): Holiday[] {
+    const rows = selectHolidaysAllStmt.all();
+    return rows.map(mapHoliday);
+  },
+
+  listBetween(fromInclusive: string, toInclusive: string): Holiday[] {
+    const rows = selectHolidaysBetweenStmt.all(fromInclusive, toInclusive);
+    return rows.map(mapHoliday);
+  },
+
+  upsert(date: string, name: string): void {
+    insertHolidayStmt.run(date, name);
+  },
+
+  deleteByDate(date: string): void {
+    deleteHolidayByDateStmt.run(date);
   }
 };
 
