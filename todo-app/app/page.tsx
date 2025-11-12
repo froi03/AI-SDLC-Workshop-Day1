@@ -365,44 +365,6 @@ export default function TodoPage() {
       </header>
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
-        <h2 className="text-xl font-semibold">Filters</h2>
-        <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-end">
-          <div className="flex flex-1 flex-col gap-2">
-            <label className="text-sm font-medium" htmlFor="priorityFilter">
-              Priority Filter
-            </label>
-            <select
-              id="priorityFilter"
-              value={priorityFilter}
-              onChange={(event) => {
-                const value = event.target.value;
-                setPriorityFilter(value === 'all' ? 'all' : normalizePriority(value));
-              }}
-              className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
-              aria-label="Filter todos by priority"
-            >
-              <option value="all">All priorities</option>
-              {priorityOptions.map((option) => (
-                <option key={option} value={option}>
-                  {priorityLabels[option]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {priorityFilter !== 'all' && (
-            <button
-              type="button"
-              className="self-start rounded border border-slate-700 px-4 py-2 text-sm"
-              onClick={() => setPriorityFilter('all')}
-            >
-              Clear priority filter
-            </button>
-          )}
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
         <h2 className="text-xl font-semibold">Create Todo</h2>
         <form className="mt-4 flex flex-col gap-4" onSubmit={handleCreateTodo}>
           <div className="flex flex-col gap-2">
@@ -552,6 +514,44 @@ export default function TodoPage() {
             Create Todo
           </button>
         </form>
+      </section>
+
+      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
+        <h2 className="text-xl font-semibold">Filters</h2>
+        <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-end">
+          <div className="flex flex-1 flex-col gap-2">
+            <label className="text-sm font-medium" htmlFor="priorityFilter">
+              Priority Filter
+            </label>
+            <select
+              id="priorityFilter"
+              value={priorityFilter}
+              onChange={(event) => {
+                const value = event.target.value;
+                setPriorityFilter(value === 'all' ? 'all' : normalizePriority(value));
+              }}
+              className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+              aria-label="Filter todos by priority"
+            >
+              <option value="all">All priorities</option>
+              {priorityOptions.map((option) => (
+                <option key={option} value={option}>
+                  {priorityLabels[option]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {priorityFilter !== 'all' && (
+            <button
+              type="button"
+              className="self-start rounded border border-slate-700 px-4 py-2 text-sm"
+              onClick={() => setPriorityFilter('all')}
+            >
+              Clear priority filter
+            </button>
+          )}
+        </div>
       </section>
 
       {uiState.loading && <p>Loading todos…</p>}
