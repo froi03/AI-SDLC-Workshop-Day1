@@ -274,8 +274,23 @@ export default function TodoPage() {
         throw new Error('Failed to update todo');
       }
 
-  const data = (await response.json()) as { todo: Todo };
-  setTodos((prev) => prev.map((item) => (item.id === todo.id ? normalizeTodoPriority(data.todo) : item)));
+      const data = (await response.json()) as { todo: Todo; nextTodo?: Todo };
+      setTodos((prev) => {
+        const normalizedCurrent = normalizeTodoPriority(data.todo);
+        let nextState = prev.map((item) => (item.id === todo.id ? normalizedCurrent : item));
+
+        if (data.nextTodo) {
+          const normalizedNext = normalizeTodoPriority(data.nextTodo);
+          const exists = nextState.some((item) => item.id === normalizedNext.id);
+          if (exists) {
+            nextState = nextState.map((item) => (item.id === normalizedNext.id ? normalizedNext : item));
+          } else {
+            nextState = [...nextState, normalizedNext];
+          }
+        }
+
+        return nextState;
+      });
     } catch (error) {
       setTodos((prev) => prev.map((item) => (item.id === todo.id ? todo : item)));
       console.error(error);

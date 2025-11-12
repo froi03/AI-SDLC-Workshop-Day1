@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
-import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
+import { calculateNextDueDate, getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
 
 const REMINDER_OPTIONS = new Set([15, 30, 60, 120, 1440, 2880, 10080]);
 
@@ -173,6 +173,8 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     return NextResponse.json({ error: 'Reminder requires a due date' }, { status: 400 });
   }
 
+  const transitioningToCompleted = !existing.isCompleted && updates.isCompleted === true;
+
   if (updates.isCompleted) {
     updates.completedAt = getSingaporeNow().toUTC().toISO();
   }
@@ -181,7 +183,28 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   }
 
   const updated = todoDB.update(id, session.userId, updates);
-  return NextResponse.json({ todo: updated });
+
+  let nextTodo = null;
+  if (transitioningToCompleted && updated.isRecurring && updated.dueDate && updated.recurrencePattern) {
+    try {
+      const nextDueDate = calculateNextDueDate(updated.dueDate, updated.recurrencePattern);
+      nextTodo = todoDB.create({
+        userId: session.userId,
+        title: updated.title,
+        description: updated.description,
+        priority: updated.priority,
+        dueDate: nextDueDate,
+        isRecurring: true,
+        recurrencePattern: updated.recurrencePattern,
+        reminderMinutes: updated.reminderMinutes ?? null
+      });
+    } catch (error) {
+      console.error('Failed to create next recurring todo', error);
+      return NextResponse.json({ error: 'Failed to create next recurring todo' }, { status: 500 });
+    }
+  }
+
+  return NextResponse.json({ todo: updated, nextTodo: nextTodo ?? undefined });
 }
 
 export async function DELETE(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
