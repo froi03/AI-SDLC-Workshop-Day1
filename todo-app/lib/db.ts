@@ -25,7 +25,7 @@ db.exec(`
     user_id INTEGER NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
-    priority TEXT NOT NULL DEFAULT 'medium',
+    priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('high', 'medium', 'low')),
     due_date TEXT,
     is_completed INTEGER NOT NULL DEFAULT 0,
     completed_at TEXT,
@@ -41,6 +41,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_todos_due_date ON todos(due_date);
   CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(is_completed);
 `);
+
+const todoColumns = db.prepare(`PRAGMA table_info('todos')`).all() as { name: string }[];
+const hasPriorityColumn = todoColumns.some((column) => column.name === 'priority');
+
+if (!hasPriorityColumn) {
+  try {
+    db.exec(`ALTER TABLE todos ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('high', 'medium', 'low'))`);
+  } catch (error) {
+    if (!(error instanceof Error) || (!error.message.includes('duplicate column name') && !error.message.includes('no such table'))) {
+      throw error;
+    }
+  }
+}
+
+db.exec(`UPDATE todos SET priority = 'medium' WHERE priority IS NULL OR priority NOT IN ('high', 'medium', 'low')`);
 
 const ensureDefaultUser = db.prepare(`
   INSERT INTO users (id, email)
@@ -111,7 +126,7 @@ function singaporeUtcIso(): string {
   return iso;
 }
 
-const selectTodos = db.prepare<TodoRow[]>(`SELECT * FROM todos WHERE user_id = ? ORDER BY is_completed ASC, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC, due_date IS NULL ASC, due_date ASC`);
+const selectTodos = db.prepare<TodoRow[]>(`SELECT * FROM todos WHERE user_id = ? ORDER BY is_completed ASC, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC, due_date IS NULL ASC, due_date ASC, created_at ASC`);
 
 const selectTodoById = db.prepare<TodoRow | undefined>(`SELECT * FROM todos WHERE id = ? AND user_id = ?`);
 

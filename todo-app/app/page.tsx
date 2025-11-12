@@ -7,6 +7,17 @@ import type { Priority, RecurrencePattern, Todo } from '@/lib/db';
 import { formatSingaporeDate, getSingaporeNow } from '@/lib/timezone';
 
 const priorityOptions: Priority[] = ['high', 'medium', 'low'];
+const priorityLabels: Record<Priority, string> = {
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low'
+};
+const priorityBadgeClasses: Record<Priority, string> = {
+  high: 'bg-red-500 text-white dark:bg-red-400 dark:text-slate-900',
+  medium: 'bg-amber-500 text-slate-900 dark:bg-amber-300 dark:text-slate-900',
+  low: 'bg-blue-500 text-white dark:bg-blue-400 dark:text-slate-900'
+};
+const PRIORITY_RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
 const recurrenceOptions: RecurrencePattern[] = ['daily', 'weekly', 'monthly', 'yearly'];
 const reminderOptions = [15, 30, 60, 120, 1440, 2880, 10080];
 
@@ -25,6 +36,8 @@ interface UiState {
   error: string | null;
 }
 
+type PriorityFilter = 'all' | Priority;
+
 const INITIAL_FORM: CreateTodoForm = {
   title: '',
   description: '',
@@ -34,6 +47,21 @@ const INITIAL_FORM: CreateTodoForm = {
   recurrencePattern: 'daily',
   reminderMinutes: ''
 };
+
+function normalizePriority(priority: unknown): Priority {
+  return priority === 'high' || priority === 'medium' || priority === 'low' ? priority : 'medium';
+}
+
+function normalizeTodoPriority(todo: Todo): Todo {
+  return {
+    ...todo,
+    priority: normalizePriority(todo.priority)
+  };
+}
+
+function isPriorityValue(value: unknown): value is Priority {
+  return value === 'high' || value === 'medium' || value === 'low';
+}
 
 function toSingaporeIso(value: string): string | null {
   if (!value) {
@@ -80,17 +108,18 @@ function groupTodos(todos: Todo[]) {
     active.push(todo);
   }
 
-  const priorityRank: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
-
   const byPriority = (a: Todo, b: Todo) => {
-    const rankA = priorityRank[a.priority];
-    const rankB = priorityRank[b.priority];
+    const rankA = PRIORITY_RANK[a.priority];
+    const rankB = PRIORITY_RANK[b.priority];
     if (rankA !== rankB) {
       return rankA - rankB;
     }
 
+    const createdA = DateTime.fromISO(a.createdAt).toMillis();
+    const createdB = DateTime.fromISO(b.createdAt).toMillis();
+
     if (!a.dueDate && !b.dueDate) {
-      return a.id - b.id;
+      return createdA - createdB;
     }
 
     if (!a.dueDate) return 1;
@@ -98,18 +127,15 @@ function groupTodos(todos: Todo[]) {
 
     const dueA = DateTime.fromISO(a.dueDate).setZone('Asia/Singapore');
     const dueB = DateTime.fromISO(b.dueDate).setZone('Asia/Singapore');
-    return dueA.toMillis() - dueB.toMillis();
+    const dueDiff = dueA.toMillis() - dueB.toMillis();
+    if (dueDiff !== 0) {
+      return dueDiff;
+    }
+
+    return createdA - createdB;
   };
 
-  overdue.sort((a, b) => {
-    const dueA = a.dueDate
-      ? DateTime.fromISO(a.dueDate).setZone('Asia/Singapore')
-      : DateTime.fromMillis(0, { zone: 'Asia/Singapore' });
-    const dueB = b.dueDate
-      ? DateTime.fromISO(b.dueDate).setZone('Asia/Singapore')
-      : DateTime.fromMillis(0, { zone: 'Asia/Singapore' });
-    return dueA.toMillis() - dueB.toMillis();
-  });
+  overdue.sort(byPriority);
   active.sort(byPriority);
   completed.sort((a, b) => {
     const aCompleted = a.completedAt ? DateTime.fromISO(a.completedAt).setZone('Asia/Singapore').toMillis() : 0;
@@ -135,6 +161,7 @@ export default function TodoPage() {
   const [editing, setEditing] = useState<Todo | null>(null);
   const [editErrors, setEditErrors] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
 
   const loadTodos = useCallback(async () => {
     setUiState((prev) => ({ ...prev, loading: true }));
@@ -143,8 +170,9 @@ export default function TodoPage() {
       if (!response.ok) {
         throw new Error('Failed to load todos');
       }
-      const data = await response.json();
-      setTodos(data.todos ?? []);
+      const data = (await response.json()) as { todos?: Todo[] };
+      const fetched = Array.isArray(data.todos) ? (data.todos as Todo[]) : [];
+      setTodos(fetched.map(normalizeTodoPriority));
       setUiState({ loading: false, error: null });
     } catch (error) {
       setUiState({ loading: false, error: (error as Error).message });
@@ -155,7 +183,14 @@ export default function TodoPage() {
     loadTodos();
   }, [loadTodos]);
 
-  const sections = useMemo(() => groupTodos(todos), [todos]);
+  const filteredTodos = useMemo(() => {
+    if (priorityFilter === 'all') {
+      return todos;
+    }
+    return todos.filter((todo) => todo.priority === priorityFilter);
+  }, [todos, priorityFilter]);
+
+  const sections = useMemo(() => groupTodos(filteredTodos), [filteredTodos]);
 
   const updateCreateForm = (updates: Partial<CreateTodoForm>) => {
     setCreateForm((prev) => ({ ...prev, ...updates }));
@@ -208,8 +243,11 @@ export default function TodoPage() {
         throw new Error(data.error ?? 'Failed to create todo');
       }
 
-      const data = await response.json();
-      setTodos((prev) => [data.todo as Todo, ...prev.filter((todo) => todo.id !== optimisticTodo.id)]);
+      const data = (await response.json()) as { todo: Todo };
+      setTodos((prev) => [
+        normalizeTodoPriority(data.todo),
+        ...prev.filter((todo) => todo.id !== optimisticTodo.id)
+      ]);
       setCreateForm(INITIAL_FORM);
     } catch (error) {
       setTodos((prev) => prev.filter((todo) => todo.id !== optimisticTodo.id));
@@ -236,8 +274,8 @@ export default function TodoPage() {
         throw new Error('Failed to update todo');
       }
 
-      const data = await response.json();
-      setTodos((prev) => prev.map((item) => (item.id === todo.id ? (data.todo as Todo) : item)));
+  const data = (await response.json()) as { todo: Todo };
+  setTodos((prev) => prev.map((item) => (item.id === todo.id ? normalizeTodoPriority(data.todo) : item)));
     } catch (error) {
       setTodos((prev) => prev.map((item) => (item.id === todo.id ? todo : item)));
       console.error(error);
@@ -275,7 +313,12 @@ export default function TodoPage() {
     const formData = new FormData(event.currentTarget);
     const title = (formData.get('title') as string).trim();
     const description = ((formData.get('description') as string) ?? '').trim();
-    const priority = formData.get('priority') as Priority;
+    const priorityValue = formData.get('priority');
+    if (!isPriorityValue(priorityValue)) {
+      setEditErrors('Invalid priority selection');
+      return;
+    }
+    const priority = priorityValue;
     const dueDate = formData.get('dueDate') as string;
     const isRecurring = formData.get('isRecurring') === 'on';
     const recurrencePattern = formData.get('recurrencePattern') as RecurrencePattern | null;
@@ -305,8 +348,8 @@ export default function TodoPage() {
         throw new Error(data.error ?? 'Failed to update todo');
       }
 
-      const data = await response.json();
-      setTodos((prev) => prev.map((item) => (item.id === editing.id ? (data.todo as Todo) : item)));
+  const data = (await response.json()) as { todo: Todo };
+  setTodos((prev) => prev.map((item) => (item.id === editing.id ? normalizeTodoPriority(data.todo) : item)));
       closeEdit();
     } catch (error) {
       setEditErrors((error as Error).message);
@@ -320,6 +363,44 @@ export default function TodoPage() {
         <h1 className="text-3xl font-semibold">Todo Dashboard</h1>
         <p className="text-sm text-slate-300">All times in Singapore timezone (Asia/Singapore).</p>
       </header>
+
+      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
+        <h2 className="text-xl font-semibold">Filters</h2>
+        <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-end">
+          <div className="flex flex-1 flex-col gap-2">
+            <label className="text-sm font-medium" htmlFor="priorityFilter">
+              Priority Filter
+            </label>
+            <select
+              id="priorityFilter"
+              value={priorityFilter}
+              onChange={(event) => {
+                const value = event.target.value;
+                setPriorityFilter(value === 'all' ? 'all' : normalizePriority(value));
+              }}
+              className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+              aria-label="Filter todos by priority"
+            >
+              <option value="all">All priorities</option>
+              {priorityOptions.map((option) => (
+                <option key={option} value={option}>
+                  {priorityLabels[option]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {priorityFilter !== 'all' && (
+            <button
+              type="button"
+              className="self-start rounded border border-slate-700 px-4 py-2 text-sm"
+              onClick={() => setPriorityFilter('all')}
+            >
+              Clear priority filter
+            </button>
+          )}
+        </div>
+      </section>
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
         <h2 className="text-xl font-semibold">Create Todo</h2>
@@ -363,12 +444,12 @@ export default function TodoPage() {
                 id="priority"
                 name="priority"
                 value={createForm.priority}
-                onChange={(event) => updateCreateForm({ priority: event.target.value as Priority })}
+                onChange={(event) => updateCreateForm({ priority: normalizePriority(event.target.value) })}
                 className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
               >
                 {priorityOptions.map((option) => (
                   <option key={option} value={option}>
-                    {option.toUpperCase()}
+                    {priorityLabels[option]}
                   </option>
                 ))}
               </select>
@@ -542,7 +623,7 @@ export default function TodoPage() {
                 >
                   {priorityOptions.map((option) => (
                     <option key={option} value={option}>
-                      {option.toUpperCase()}
+                      {priorityLabels[option]}
                     </option>
                   ))}
                 </select>
@@ -621,8 +702,12 @@ interface TodoSectionProps {
 }
 
 function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit, onDelete }: TodoSectionProps) {
+  const sectionSlug = toTestIdSegment(title);
   return (
-    <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
+    <section
+      className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow"
+      data-testid={`todo-section-${sectionSlug}`}
+    >
       <header className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold">{title}</h2>
@@ -634,9 +719,14 @@ function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit
       {todos.length === 0 ? (
         <p className="mt-6 text-sm text-slate-400">{emptyMessage}</p>
       ) : (
-        <ul className="mt-6 flex flex-col gap-3">
+        <ul className="mt-6 flex flex-col gap-3" data-testid={`${sectionSlug}-list`}>
           {todos.map((todo) => (
-            <li key={todo.id} className="rounded border border-slate-800 bg-slate-950/60 p-4">
+            <li
+              key={todo.id}
+              className="rounded border border-slate-800 bg-slate-950/60 p-4"
+              data-testid="todo-item"
+              data-priority={todo.priority}
+            >
               <div className="flex items-start justify-between gap-4">
                 <label className="flex flex-1 items-start gap-3">
                   <input
@@ -650,9 +740,7 @@ function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit
                     <h3 className="text-base font-medium">{todo.title}</h3>
                     {todo.description && <p className="mt-1 text-sm text-slate-300">{todo.description}</p>}
                     <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                      <span className={`rounded px-2 py-1 font-semibold uppercase text-slate-900`} style={{ backgroundColor: priorityColor(todo.priority) }}>
-                        {todo.priority}
-                      </span>
+                      <PriorityBadge priority={todo.priority} />
                       <span>{todo.dueDate ? `Due ${formatSingaporeDate(todo.dueDate)}` : 'No due date'}</span>
                       {todo.isRecurring && todo.recurrencePattern && <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-300">Repeats {todo.recurrencePattern}</span>}
                       {todo.reminderMinutes != null && <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">Reminder {todo.reminderMinutes}m</span>}
@@ -682,14 +770,21 @@ function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit
   );
 }
 
-function priorityColor(priority: Priority) {
-  switch (priority) {
-    case 'high':
-      return '#ef4444';
-    case 'medium':
-      return '#f59e0b';
-    case 'low':
-    default:
-      return '#3b82f6';
-  }
+function PriorityBadge({ priority }: { priority: Priority }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded px-2 py-1 text-xs font-semibold uppercase tracking-wide ${priorityBadgeClasses[priority]}`}
+      aria-label={`${priorityLabels[priority]} priority`}
+      data-testid={`priority-badge-${priority}`}
+    >
+      <span aria-hidden="true">{priorityLabels[priority]}</span>
+    </span>
+  );
+}
+
+function toTestIdSegment(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
 }

@@ -1,7 +1,7 @@
 const nextConfig = {
   reactStrictMode: true,
+  typedRoutes: true,
   experimental: {
-    typedRoutes: true,
     serverActions: {
       allowedOrigins: ['localhost:3000']
     }

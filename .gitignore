@@ -1,1 +1,7 @@
 node_modules
+.DS_Store
+todo-app/.next/
+todo-app/test-results/
+todo-app/test-results-html/
+todo-app/todos.db-shm
+todo-app/todos.db-wal
