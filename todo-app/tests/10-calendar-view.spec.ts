@@ -51,6 +51,29 @@ test('renders calendar grid and supports month navigation', async ({ page }) => 
 
   await page.getByTestId('calendar-today').click();
   await expect(page.getByTestId('calendar-grid').locator('span', { hasText: 'Today' }).first()).toBeVisible();
+
+  const now = DateTime.now().setZone('Asia/Singapore');
+  const january = DateTime.fromObject({ year: now.year, month: 1, day: 1 }, { zone: 'Asia/Singapore' });
+  const monthDiff = Math.round(
+    january.startOf('month').diff(now.startOf('month'), 'months').months
+  );
+
+  if (monthDiff > 0) {
+    for (let index = 0; index < monthDiff; index += 1) {
+      await Promise.all([waitForCalendarFetches(page), page.getByTestId('calendar-next').click()]);
+    }
+  } else if (monthDiff < 0) {
+    for (let index = 0; index < Math.abs(monthDiff); index += 1) {
+      await Promise.all([waitForCalendarFetches(page), page.getByTestId('calendar-prev').click()]);
+    }
+  }
+
+  const januaryLabel = await page.getByTestId('calendar-month-label').textContent();
+  expect(januaryLabel).toContain('January');
+
+  const newYearCell = page.getByTestId(`calendar-day-${january.toISODate()}`);
+  await expect(newYearCell).toBeVisible();
+  await expect(newYearCell.locator('span', { hasText: "New Year's Day" })).toBeVisible();
 });
 
 test('opens day modal showing todos due on selected date', async ({ page, request }) => {

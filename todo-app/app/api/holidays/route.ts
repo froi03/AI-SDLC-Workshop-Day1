@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { DateTime } from 'luxon';
 import { getSession } from '@/lib/auth';
 import { holidayDB } from '@/lib/db';
+import { getHolidaySeedsForYear } from '@/lib/holidays-data';
 
 function buildDateRange(params: URLSearchParams): { from: string; to: string } | null {
   const monthParam = params.get('month');
@@ -46,6 +47,24 @@ function normalizeHolidayDate(value: string): string {
   return parsed.toISODate() ?? value;
 }
 
+function ensureHolidaysSeeded(range: { from: string; to: string }): void {
+  const fromDate = DateTime.fromISO(range.from, { zone: 'Asia/Singapore' });
+  const toDate = DateTime.fromISO(range.to, { zone: 'Asia/Singapore' });
+  if (!fromDate.isValid || !toDate.isValid) {
+    return;
+  }
+
+  const startYear = fromDate.year;
+  const endYear = toDate.year;
+
+  for (let year = startYear; year <= endYear; year += 1) {
+    const seeds = getHolidaySeedsForYear(year);
+    for (const seed of seeds) {
+      holidayDB.upsert(seed.date, seed.name);
+    }
+  }
+}
+
 export async function GET(request: NextRequest) {
   const session = await getSession();
   if (!session) {
@@ -57,6 +76,12 @@ export async function GET(request: NextRequest) {
     range = buildDateRange(request.nextUrl.searchParams);
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 400 });
+  }
+
+  if (range) {
+    ensureHolidaysSeeded(range);
+  } else {
+    ensureHolidaysSeeded({ from: '2024-01-01', to: '2026-12-31' });
   }
 
   const holidays = range

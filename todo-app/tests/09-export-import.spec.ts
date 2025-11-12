@@ -29,9 +29,13 @@ test('exports current todos to downloadable JSON', async ({ page }) => {
     priority: 'high'
   });
 
+  await page.getByRole('button', { name: 'Export Data' }).click();
+  const exportJsonButton = page.getByRole('button', { name: 'JSON', exact: true });
+  await expect(exportJsonButton).toBeVisible();
+
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: 'Export JSON' }).click()
+    exportJsonButton.click()
   ]);
 
   await expect(page.getByText('Export completed successfully.')).toBeVisible();
@@ -69,9 +73,13 @@ test('exports current todos to downloadable CSV', async ({ page }) => {
     priority: 'medium'
   });
 
+  await page.getByRole('button', { name: 'Export Data' }).click();
+  const exportCsvButton = page.getByRole('button', { name: 'CSV', exact: true });
+  await expect(exportCsvButton).toBeVisible();
+
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: 'Export CSV' }).click()
+    exportCsvButton.click()
   ]);
 
   await expect(page.getByText('CSV export completed successfully.')).toBeVisible();
