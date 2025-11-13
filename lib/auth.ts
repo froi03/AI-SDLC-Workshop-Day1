@@ -2,21 +2,9 @@ import jwt from 'jsonwebtoken';
 import { cookies } from 'next/headers';
 import type { NextResponse } from 'next/server';
 import { userDB } from '@/lib/db';
-
-export interface Session {
-  userId: number;
-}
-
-export const SESSION_COOKIE_NAME = 'session_token';
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
-
-function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('JWT_SECRET environment variable is not configured');
-  }
-  return secret;
-}
+import { getJwtSecret } from './auth/config';
+import { SESSION_COOKIE_NAME, SESSION_TTL_SECONDS } from './auth/constants';
+import type { Session } from './auth/types';
 
 type SessionPayload = jwt.JwtPayload & {
   userId: number;
@@ -79,3 +67,5 @@ export async function requireSession(): Promise<Session> {
   }
   return session;
 }
+
+export type { Session } from './auth/types';

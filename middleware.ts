@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { SESSION_COOKIE_NAME, verifySessionToken } from '@/lib/auth';
+import { SESSION_COOKIE_NAME } from '@/lib/auth/constants';
+import { verifySessionToken } from '@/lib/auth/edge';
 
 const PROTECTED_PATHS = ['/', '/calendar'];
 
@@ -8,11 +9,11 @@ function isProtectedPath(pathname: string): boolean {
   return PROTECTED_PATHS.some((protectedPath) => pathname === protectedPath || pathname.startsWith(`${protectedPath}/`));
 }
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
 
   const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
-  const session = verifySessionToken(sessionCookie);
+  const session = await verifySessionToken(sessionCookie);
 
   if (pathname.startsWith('/login')) {
     if (session) {
