@@ -1,35 +1,13 @@
-import { defineConfig, devices } from '@playwright/test';
-
-const PORT = Number(process.env.PORT ?? 3000);
+import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  timeout: 60_000,
-  expect: {
-    timeout: 5_000
-  },
-  fullyParallel: false,
+  snapshotDir: './tests/__snapshots__',
+  forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  reporter: [['list'], ['html', { outputFolder: 'test-results-html', open: 'never' }]],
+  workers: 1,
   use: {
-    baseURL: `http://localhost:${PORT}`,
-    trace: 'retain-on-failure',
-    viewport: { width: 1280, height: 720 },
-    timezoneId: 'Asia/Singapore',
-    launchOptions: {
-      args: ['--disable-dev-shm-usage']
-    }
+    timezoneId: 'Asia/Singapore'
   },
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] }
-    }
-  ],
-  webServer: {
-    command: 'npm run dev',
-    port: PORT,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000
-  }
+  reporter: [['list']]
 });

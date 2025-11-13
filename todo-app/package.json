@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@simplewebauthn/browser": "^10.0.0",
@@ -18,7 +19,8 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@types/luxon": "^3.3.7",
+    "@playwright/test": "^1.56.1",
+    "@types/luxon": "^3.7.1",
     "@types/node": "^20.11.24",
     "@types/react": "^18.2.74",
     "@types/react-dom": "^18.2.23",
@@ -26,7 +28,6 @@
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.0.3",
     "tailwindcss": "^3.4.10",
-    "typescript": "^5.6.3",
-    "@playwright/test": "^1.51.1"
+    "typescript": "^5.6.3"
   }
 }

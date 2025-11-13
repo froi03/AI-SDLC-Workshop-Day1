@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { tagDB, todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
-import { calculateNextDueDate, getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
+import { db, tagDB, todoDB, type Priority, type RecurrencePattern, type Todo } from '@/lib/db';
+import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
+import { getNextRecurrenceDueDate } from '@/lib/recurrence';
 
 const REMINDER_OPTIONS = new Set([15, 30, 60, 120, 1440, 2880, 10080]);
 
@@ -30,7 +31,7 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
     return NextResponse.json({ error: 'Invalid todo id' }, { status: 400 });
   }
 
-  const todo = todoDB.getWithRelations(id, session.userId);
+  const todo = todoDB.getById(id, session.userId);
   if (!todo) {
     return NextResponse.json({ error: 'Todo not found' }, { status: 404 });
   }
@@ -70,6 +71,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     recurrencePattern?: RecurrencePattern | null;
     reminderMinutes?: number | null;
     completedAt?: string | null;
+    lastNotificationSent?: string | null;
   } = {};
 
   if ('title' in body) {
@@ -106,6 +108,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
       updates.reminderMinutes = null;
       updates.isRecurring = false;
       updates.recurrencePattern = null;
+      updates.lastNotificationSent = null;
     } else if (typeof body.dueDate === 'string') {
       try {
         const parsed = parseSingaporeDate(body.dueDate);
@@ -113,6 +116,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
           return NextResponse.json({ error: 'Due date must be at least one minute in the future (Singapore timezone)' }, { status: 400 });
         }
         updates.dueDate = parsed;
+        updates.lastNotificationSent = null;
       } catch (error) {
         return NextResponse.json({ error: (error as Error).message }, { status: 400 });
       }
@@ -148,10 +152,12 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   if ('reminderMinutes' in body) {
     if (body.reminderMinutes === null) {
       updates.reminderMinutes = null;
+      updates.lastNotificationSent = null;
     } else if (typeof body.reminderMinutes !== 'number' || !REMINDER_OPTIONS.has(body.reminderMinutes)) {
       return NextResponse.json({ error: 'Invalid reminder option' }, { status: 400 });
     } else {
       updates.reminderMinutes = body.reminderMinutes;
+      updates.lastNotificationSent = null;
     }
   }
 
@@ -173,8 +179,6 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     return NextResponse.json({ error: 'Reminder requires a due date' }, { status: 400 });
   }
 
-  const transitioningToCompleted = !existing.isCompleted && updates.isCompleted === true;
-
   if (updates.isCompleted) {
     updates.completedAt = getSingaporeNow().toUTC().toISO();
   }
@@ -182,45 +186,39 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     updates.completedAt = null;
   }
 
-  const updated = todoDB.update(id, session.userId, updates);
-  const enriched = todoDB.getWithRelations(id, session.userId);
-  if (!enriched) {
-    return NextResponse.json({ error: 'Todo not found after update' }, { status: 500 });
-  }
+  const isCompleting = updates.isCompleted === true && !existing.isCompleted;
 
-  let nextTodo = null;
-  if (transitioningToCompleted && updated.isRecurring && updated.dueDate && updated.recurrencePattern) {
-    try {
-      const nextDueDate = calculateNextDueDate(updated.dueDate, updated.recurrencePattern);
-      nextTodo = todoDB.create({
-        userId: session.userId,
-        title: updated.title,
-        description: updated.description,
-        priority: updated.priority,
-        dueDate: nextDueDate,
-        isRecurring: true,
-        recurrencePattern: updated.recurrencePattern,
-        reminderMinutes: updated.reminderMinutes ?? null
-      });
-    } catch (error) {
-      console.error('Failed to create next recurring todo', error);
-      return NextResponse.json({ error: 'Failed to create next recurring todo' }, { status: 500 });
+  const applyUpdate = db.transaction(() => {
+    const updatedTodo = todoDB.update(id, session.userId, updates);
+
+    if (!isCompleting || !updatedTodo.isRecurring || !updatedTodo.recurrencePattern || !updatedTodo.dueDate) {
+      return { updatedTodo, nextTodo: null as Todo | null };
     }
-  }
 
-  const response: Record<string, unknown> = {
-    todo: enriched
-  };
+    const nextDueDate = getNextRecurrenceDueDate(updatedTodo.dueDate, updatedTodo.recurrencePattern);
+    if (!nextDueDate) {
+      return { updatedTodo, nextTodo: null as Todo | null };
+    }
 
-  if (nextTodo) {
-    response.nextTodo = { ...nextTodo, subtasks: [], tagIds: [] };
-  }
+    const nextTodo = todoDB.create({
+      userId: session.userId,
+      title: updatedTodo.title,
+      description: updatedTodo.description,
+      priority: updatedTodo.priority,
+      dueDate: nextDueDate,
+      isRecurring: true,
+      recurrencePattern: updatedTodo.recurrencePattern,
+      reminderMinutes: updatedTodo.reminderMinutes
+    });
 
-  if ('priority' in updates || 'dueDate' in updates || 'isCompleted' in updates || 'isRecurring' in updates || 'recurrencePattern' in updates || 'reminderMinutes' in updates) {
-    response.tags = tagDB.listByUser(session.userId);
-  }
+    const tagIdsToCopy = updatedTodo.tags.map((tag) => tag.id);
+    const tagsForNext = tagIdsToCopy.length > 0 ? tagDB.attachMany(nextTodo.id, tagIdsToCopy, session.userId) : [];
 
-  return NextResponse.json(response);
+    return { updatedTodo, nextTodo: { ...nextTodo, tags: tagsForNext } };
+  });
+
+  const { updatedTodo: updated, nextTodo } = applyUpdate();
+  return NextResponse.json({ todo: updated, nextTodo });
 }
 
 export async function DELETE(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
