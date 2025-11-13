@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, FormEvent } from 'react';
 import { DateTime } from 'luxon';
 import type {
   Priority,
@@ -32,6 +32,7 @@ const PRIORITY_BADGE_STYLES: Record<Priority, { background: string; border: stri
 };
 
 const DEFAULT_TAG_COLOR = '#3B82F6';
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 
 function stripCounts(tag: TagWithCounts): Tag {
   const { todoCount: _count, ...rest } = tag;
@@ -317,6 +318,12 @@ export default function TodoPage() {
   const [templateUseSubmitting, setTemplateUseSubmitting] = useState(false);
   const [templateMissingTags, setTemplateMissingTags] = useState<number[]>([]);
   const [templateDeleteTarget, setTemplateDeleteTarget] = useState<Template | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSummary, setImportSummary] = useState<{ todos: number; subtasks: number; tags: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const {
     isSupported: notificationsSupported,
     permission: notificationPermission,
@@ -508,6 +515,99 @@ export default function TodoPage() {
     clearPriorityFilter();
     clearTagFilters();
   };
+
+  const handleExport = useCallback(async () => {
+    setExportError(null);
+    setExporting(true);
+    try {
+      const response = await fetch('/api/todos/export', { cache: 'no-store' });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({ error: 'Failed to export todos' }));
+        throw new Error(data.error ?? 'Failed to export todos');
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition');
+      const match = disposition?.match(/filename="?([^";]+)"?/i);
+      const fallback = getSingaporeNow().toFormat('yyyyLLdd-HHmmss');
+      const filename = match?.[1] ?? `todos-export-${fallback}.json`;
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError((error as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+
+  const handleImportClick = useCallback(() => {
+    setImportError(null);
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleImportFileChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) {
+        return;
+      }
+
+      setImportError(null);
+      setImportSummary(null);
+
+      if (file.size > MAX_IMPORT_BYTES) {
+        setImportError('Import file exceeds 5MB limit');
+        event.target.value = '';
+        return;
+      }
+
+      setImporting(true);
+      try {
+        const text = await file.text();
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new Error('Import file is not valid JSON');
+        }
+
+        const response = await fetch('/api/todos/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsed)
+        });
+
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok || !data) {
+          const message = (data as { error?: string } | null)?.error ?? 'Failed to import todos';
+          throw new Error(message);
+        }
+
+        setImportSummary({
+          todos: (data as { importedTodosCount?: number }).importedTodosCount ?? 0,
+          subtasks: (data as { importedSubtasksCount?: number }).importedSubtasksCount ?? 0,
+          tags: (data as { importedTagsCount?: number }).importedTagsCount ?? 0
+        });
+
+        await loadTodos();
+        await loadTags();
+      } catch (error) {
+        setImportError((error as Error).message);
+      } finally {
+        setImporting(false);
+        event.target.value = '';
+      }
+    },
+    [loadTags, loadTodos]
+  );
 
   const resetTemplateModalState = () => {
     setTemplateModalOpen(false);
@@ -1489,6 +1589,55 @@ export default function TodoPage() {
           <p className="mt-2 text-xs text-amber-300">{notificationsError}</p>
         )}
       </section>
+
+        <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-5 shadow">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Export &amp; Import</h2>
+              <p className="text-xs text-slate-400">
+                Download a JSON backup or restore data from a previous export (max 5&nbsp;MB).
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleExport}
+                disabled={exporting}
+                className="rounded border border-blue-500 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-200 hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              >
+                {exporting ? 'Preparing export…' : 'Export JSON'}
+              </button>
+              <button
+                type="button"
+                onClick={handleImportClick}
+                disabled={importing}
+                className="rounded border border-emerald-500 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-200 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              >
+                {importing ? 'Importing…' : 'Import JSON'}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                onChange={handleImportFileChange}
+                className="hidden"
+              />
+            </div>
+          </div>
+          {(exportError || importError || importSummary) && (
+            <div className="mt-3 space-y-2 text-sm">
+              {exportError && <p className="text-red-400">{exportError}</p>}
+              {importError && <p className="text-red-400">{importError}</p>}
+              {importSummary && (
+                <p className="text-emerald-300">
+                  Imported {importSummary.todos} {importSummary.todos === 1 ? 'todo' : 'todos'}, {importSummary.subtasks}{' '}
+                  {importSummary.subtasks === 1 ? 'subtask' : 'subtasks'}, and {importSummary.tags}{' '}
+                  {importSummary.tags === 1 ? 'tag' : 'tags'}.
+                </p>
+              )}
+            </div>
+          )}
+        </section>
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
         <h2 className="text-xl font-semibold">Create Todo</h2>
