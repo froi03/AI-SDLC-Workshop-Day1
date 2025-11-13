@@ -4,11 +4,21 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { DateTime } from 'luxon';
 import type { Priority, RecurrencePattern, Todo } from '@/lib/db';
+import { useNotifications } from '@/lib/hooks/useNotifications';
 import { formatSingaporeDate, getSingaporeNow } from '@/lib/timezone';
 
 const priorityOptions: Priority[] = ['high', 'medium', 'low'];
+type PriorityFilter = 'all' | Priority;
+const priorityFilterOptions: PriorityFilter[] = ['all', 'high', 'medium', 'low'];
 const recurrenceOptions: RecurrencePattern[] = ['daily', 'weekly', 'monthly', 'yearly'];
 const reminderOptions = [15, 30, 60, 120, 1440, 2880, 10080];
+const PRIORITY_RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
+
+const PRIORITY_BADGE_STYLES: Record<Priority, { background: string; border: string; text: string }> = {
+  high: { background: '#ef4444', border: '#b91c1c', text: '#0f172a' },
+  medium: { background: '#f59e0b', border: '#b45309', text: '#0f172a' },
+  low: { background: '#3b82f6', border: '#1d4ed8', text: '#0f172a' }
+};
 
 interface CreateTodoForm {
   title: string;
@@ -80,36 +90,31 @@ function groupTodos(todos: Todo[]) {
     active.push(todo);
   }
 
-  const priorityRank: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
-
   const byPriority = (a: Todo, b: Todo) => {
-    const rankA = priorityRank[a.priority];
-    const rankB = priorityRank[b.priority];
+    const rankA = PRIORITY_RANK[a.priority];
+    const rankB = PRIORITY_RANK[b.priority];
     if (rankA !== rankB) {
       return rankA - rankB;
     }
 
-    if (!a.dueDate && !b.dueDate) {
-      return a.id - b.id;
+    const dueA = a.dueDate ? DateTime.fromISO(a.dueDate).setZone('Asia/Singapore') : null;
+    const dueB = b.dueDate ? DateTime.fromISO(b.dueDate).setZone('Asia/Singapore') : null;
+
+    if (dueA && dueB) {
+      const diff = dueA.toMillis() - dueB.toMillis();
+      if (diff !== 0) {
+        return diff;
+      }
+    } else if (dueA) {
+      return -1;
+    } else if (dueB) {
+      return 1;
     }
 
-    if (!a.dueDate) return 1;
-    if (!b.dueDate) return -1;
-
-    const dueA = DateTime.fromISO(a.dueDate).setZone('Asia/Singapore');
-    const dueB = DateTime.fromISO(b.dueDate).setZone('Asia/Singapore');
-    return dueA.toMillis() - dueB.toMillis();
+    return a.id - b.id;
   };
 
-  overdue.sort((a, b) => {
-    const dueA = a.dueDate
-      ? DateTime.fromISO(a.dueDate).setZone('Asia/Singapore')
-      : DateTime.fromMillis(0, { zone: 'Asia/Singapore' });
-    const dueB = b.dueDate
-      ? DateTime.fromISO(b.dueDate).setZone('Asia/Singapore')
-      : DateTime.fromMillis(0, { zone: 'Asia/Singapore' });
-    return dueA.toMillis() - dueB.toMillis();
-  });
+  overdue.sort(byPriority);
   active.sort(byPriority);
   completed.sort((a, b) => {
     const aCompleted = a.completedAt ? DateTime.fromISO(a.completedAt).setZone('Asia/Singapore').toMillis() : 0;
@@ -131,10 +136,21 @@ function singaporeNowUtcIso(): string {
 export default function TodoPage() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [uiState, setUiState] = useState<UiState>({ loading: true, error: null });
-  const [createForm, setCreateForm] = useState<CreateTodoForm>(INITIAL_FORM);
+  const [createForm, setCreateForm] = useState<CreateTodoForm>({ ...INITIAL_FORM });
   const [editing, setEditing] = useState<Todo | null>(null);
   const [editErrors, setEditErrors] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
+  const {
+    isSupported: notificationsSupported,
+    permission: notificationPermission,
+    isPolling: notificationsPolling,
+    error: notificationsError,
+    enableNotifications
+  } = useNotifications();
+
+  const notificationsEnabled = notificationsSupported && notificationPermission === 'granted';
+  const notificationsDenied = notificationsSupported && notificationPermission === 'denied';
 
   const loadTodos = useCallback(async () => {
     setUiState((prev) => ({ ...prev, loading: true }));
@@ -155,7 +171,14 @@ export default function TodoPage() {
     loadTodos();
   }, [loadTodos]);
 
-  const sections = useMemo(() => groupTodos(todos), [todos]);
+  const filteredTodos = useMemo(() => {
+    if (priorityFilter === 'all') {
+      return todos;
+    }
+    return todos.filter((todo) => todo.priority === priorityFilter);
+  }, [todos, priorityFilter]);
+
+  const sections = useMemo(() => groupTodos(filteredTodos), [filteredTodos]);
 
   const updateCreateForm = (updates: Partial<CreateTodoForm>) => {
     setCreateForm((prev) => ({ ...prev, ...updates }));
@@ -190,6 +213,7 @@ export default function TodoPage() {
       isRecurring: payload.isRecurring,
       recurrencePattern: payload.recurrencePattern,
       reminderMinutes: payload.reminderMinutes,
+      lastNotificationSent: null,
       createdAt: optimisticTimestamp,
       updatedAt: optimisticTimestamp
     };
@@ -210,7 +234,7 @@ export default function TodoPage() {
 
       const data = await response.json();
       setTodos((prev) => [data.todo as Todo, ...prev.filter((todo) => todo.id !== optimisticTodo.id)]);
-      setCreateForm(INITIAL_FORM);
+      setCreateForm({ ...INITIAL_FORM });
     } catch (error) {
       setTodos((prev) => prev.filter((todo) => todo.id !== optimisticTodo.id));
       setCreateError((error as Error).message);
@@ -236,8 +260,21 @@ export default function TodoPage() {
         throw new Error('Failed to update todo');
       }
 
-      const data = await response.json();
-      setTodos((prev) => prev.map((item) => (item.id === todo.id ? (data.todo as Todo) : item)));
+      const data = (await response.json()) as { todo: Todo; nextTodo?: Todo | null };
+      setTodos((prev) => {
+        const withUpdated = prev.map((item) => (item.id === todo.id ? data.todo : item));
+        const nextTodo = data.nextTodo;
+        if (!nextTodo) {
+          return withUpdated;
+        }
+
+        const exists = withUpdated.some((item) => item.id === nextTodo.id);
+        if (exists) {
+          return withUpdated;
+        }
+
+        return [nextTodo, ...withUpdated];
+      });
     } catch (error) {
       setTodos((prev) => prev.map((item) => (item.id === todo.id ? todo : item)));
       console.error(error);
@@ -320,6 +357,51 @@ export default function TodoPage() {
         <h1 className="text-3xl font-semibold">Todo Dashboard</h1>
         <p className="text-sm text-slate-300">All times in Singapore timezone (Asia/Singapore).</p>
       </header>
+
+      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-5 shadow">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Browser reminders</h2>
+            <p className="text-xs text-slate-400">
+              Enable notifications to receive alerts before a todo is due.
+            </p>
+          </div>
+          {notificationsSupported ? (
+            notificationsEnabled ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-emerald-600/60 bg-emerald-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-200">
+                Enabled
+                <span className="text-[10px] font-normal text-emerald-300/80">
+                  {notificationsPolling ? 'Polling every 30s' : 'Waiting'}
+                </span>
+              </span>
+            ) : notificationsDenied ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-amber-200">
+                Permission denied
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={enableNotifications}
+                className="rounded bg-blue-600 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-white hover:bg-blue-500"
+              >
+                Enable notifications
+              </button>
+            )
+          ) : (
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-xs uppercase text-slate-400">
+              Not supported in this browser
+            </span>
+          )}
+        </div>
+        {notificationsSupported && notificationsDenied && (
+          <p className="mt-2 text-xs text-slate-400">
+            Allow notifications in your browser settings to receive reminder alerts.
+          </p>
+        )}
+        {notificationsError && (
+          <p className="mt-2 text-xs text-amber-300">{notificationsError}</p>
+        )}
+      </section>
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
         <h2 className="text-xl font-semibold">Create Todo</h2>
@@ -475,6 +557,47 @@ export default function TodoPage() {
 
       {uiState.loading && <p>Loading todos…</p>}
       {uiState.error && <p className="text-sm text-red-400">{uiState.error}</p>}
+
+      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 shadow">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-semibold text-slate-200">Filter by priority</span>
+          <div className="flex flex-wrap gap-2">
+            {priorityFilterOptions.map((option) => {
+              const active = priorityFilter === option;
+              const label = option === 'all' ? 'All' : option.toUpperCase();
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setPriorityFilter(option)}
+                  className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition ${
+                    active
+                      ? 'border-blue-400 bg-blue-500/20 text-blue-200'
+                      : 'border-slate-700 text-slate-300 hover:border-blue-400 hover:text-blue-200'
+                  }`}
+                  aria-pressed={active}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        {priorityFilter !== 'all' && (
+          <div className="mt-3 flex items-center gap-3 text-xs uppercase">
+            <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 font-semibold text-blue-200">
+              Priority: {priorityFilter.toUpperCase()}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPriorityFilter('all')}
+              className="text-[11px] font-medium text-slate-300 underline hover:text-white"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+      </section>
 
       <section className="flex flex-col gap-8">
         <TodoSection
@@ -650,11 +773,13 @@ function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit
                     <h3 className="text-base font-medium">{todo.title}</h3>
                     {todo.description && <p className="mt-1 text-sm text-slate-300">{todo.description}</p>}
                     <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                      <span className={`rounded px-2 py-1 font-semibold uppercase text-slate-900`} style={{ backgroundColor: priorityColor(todo.priority) }}>
-                        {todo.priority}
-                      </span>
+                      <PriorityBadge priority={todo.priority} />
                       <span>{todo.dueDate ? `Due ${formatSingaporeDate(todo.dueDate)}` : 'No due date'}</span>
-                      {todo.isRecurring && todo.recurrencePattern && <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-300">Repeats {todo.recurrencePattern}</span>}
+                      {todo.isRecurring && todo.recurrencePattern && (
+                        <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-300">
+                          Repeats {todo.recurrencePattern.toUpperCase()}
+                        </span>
+                      )}
                       {todo.reminderMinutes != null && <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">Reminder {todo.reminderMinutes}m</span>}
                     </div>
                   </div>
@@ -682,14 +807,22 @@ function TodoSection({ title, description, emptyMessage, todos, onToggle, onEdit
   );
 }
 
-function priorityColor(priority: Priority) {
-  switch (priority) {
-    case 'high':
-      return '#ef4444';
-    case 'medium':
-      return '#f59e0b';
-    case 'low':
-    default:
-      return '#3b82f6';
-  }
+function PriorityBadge({ priority }: { priority: Priority }) {
+  const style = getPriorityBadgeStyle(priority);
+  return (
+    <span
+      className="rounded border px-2 py-1 text-xs font-semibold uppercase tracking-wide"
+      style={{
+        backgroundColor: style.background,
+        borderColor: style.border,
+        color: style.text
+      }}
+    >
+      {priority.toUpperCase()}
+    </span>
+  );
+}
+
+function getPriorityBadgeStyle(priority: Priority) {
+  return PRIORITY_BADGE_STYLES[priority];
 }

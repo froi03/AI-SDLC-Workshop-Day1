@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
+import { db, todoDB, type Priority, type RecurrencePattern, type Todo } from '@/lib/db';
 import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
+import { getNextRecurrenceDueDate } from '@/lib/recurrence';
 
 const REMINDER_OPTIONS = new Set([15, 30, 60, 120, 1440, 2880, 10080]);
 
@@ -70,6 +71,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     recurrencePattern?: RecurrencePattern | null;
     reminderMinutes?: number | null;
     completedAt?: string | null;
+    lastNotificationSent?: string | null;
   } = {};
 
   if ('title' in body) {
@@ -106,6 +108,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
       updates.reminderMinutes = null;
       updates.isRecurring = false;
       updates.recurrencePattern = null;
+      updates.lastNotificationSent = null;
     } else if (typeof body.dueDate === 'string') {
       try {
         const parsed = parseSingaporeDate(body.dueDate);
@@ -113,6 +116,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
           return NextResponse.json({ error: 'Due date must be at least one minute in the future (Singapore timezone)' }, { status: 400 });
         }
         updates.dueDate = parsed;
+        updates.lastNotificationSent = null;
       } catch (error) {
         return NextResponse.json({ error: (error as Error).message }, { status: 400 });
       }
@@ -148,10 +152,12 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   if ('reminderMinutes' in body) {
     if (body.reminderMinutes === null) {
       updates.reminderMinutes = null;
+      updates.lastNotificationSent = null;
     } else if (typeof body.reminderMinutes !== 'number' || !REMINDER_OPTIONS.has(body.reminderMinutes)) {
       return NextResponse.json({ error: 'Invalid reminder option' }, { status: 400 });
     } else {
       updates.reminderMinutes = body.reminderMinutes;
+      updates.lastNotificationSent = null;
     }
   }
 
@@ -180,8 +186,36 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     updates.completedAt = null;
   }
 
-  const updated = todoDB.update(id, session.userId, updates);
-  return NextResponse.json({ todo: updated });
+  const isCompleting = updates.isCompleted === true && !existing.isCompleted;
+
+  const applyUpdate = db.transaction(() => {
+    const updatedTodo = todoDB.update(id, session.userId, updates);
+
+    if (!isCompleting || !updatedTodo.isRecurring || !updatedTodo.recurrencePattern || !updatedTodo.dueDate) {
+      return { updatedTodo, nextTodo: null as Todo | null };
+    }
+
+    const nextDueDate = getNextRecurrenceDueDate(updatedTodo.dueDate, updatedTodo.recurrencePattern);
+    if (!nextDueDate) {
+      return { updatedTodo, nextTodo: null as Todo | null };
+    }
+
+    const nextTodo = todoDB.create({
+      userId: session.userId,
+      title: updatedTodo.title,
+      description: updatedTodo.description,
+      priority: updatedTodo.priority,
+      dueDate: nextDueDate,
+      isRecurring: true,
+      recurrencePattern: updatedTodo.recurrencePattern,
+      reminderMinutes: updatedTodo.reminderMinutes
+    });
+
+    return { updatedTodo, nextTodo };
+  });
+
+  const { updatedTodo: updated, nextTodo } = applyUpdate();
+  return NextResponse.json({ todo: updated, nextTodo });
 }
 
 export async function DELETE(_request: NextRequest, context: { params: Promise<{ id: string }> }) {

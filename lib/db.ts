@@ -25,13 +25,14 @@ db.exec(`
     user_id INTEGER NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
-    priority TEXT NOT NULL DEFAULT 'medium',
+    priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
     due_date TEXT,
     is_completed INTEGER NOT NULL DEFAULT 0,
     completed_at TEXT,
     is_recurring INTEGER NOT NULL DEFAULT 0,
-    recurrence_pattern TEXT,
-    reminder_minutes INTEGER,
+    recurrence_pattern TEXT CHECK (recurrence_pattern IN ('daily','weekly','monthly','yearly')),
+  reminder_minutes INTEGER,
+  last_notification_sent TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -40,7 +41,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_todos_user_id ON todos(user_id);
   CREATE INDEX IF NOT EXISTS idx_todos_due_date ON todos(due_date);
   CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(is_completed);
+  CREATE INDEX IF NOT EXISTS idx_todos_priority ON todos(user_id, priority);
 `);
+
+ensureTodoConstraints();
 
 const ensureDefaultUser = db.prepare(`
   INSERT INTO users (id, email)
@@ -49,6 +53,102 @@ const ensureDefaultUser = db.prepare(`
 `);
 
 ensureDefaultUser.run();
+
+function ensureTodoConstraints() {
+  const tableSqlRow = db
+    .prepare<{ sql: string } | undefined>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'todos'")
+    .get();
+
+  if (!tableSqlRow) {
+    return;
+  }
+
+  const tableSql = tableSqlRow.sql ?? '';
+  const columnInfo = db.prepare<{ name: string }>(`PRAGMA table_info('todos')`).all();
+  const hasLastNotificationColumn = columnInfo.some((column) => column.name === 'last_notification_sent');
+
+  const needsPriorityCheck = !tableSql.includes("CHECK (priority IN ('high','medium','low'))");
+  const needsRecurrenceCheck = !tableSql.includes("CHECK (recurrence_pattern IN ('daily','weekly','monthly','yearly'))");
+
+  if (needsPriorityCheck || needsRecurrenceCheck) {
+    const lastNotificationSelect = hasLastNotificationColumn
+      ? 'last_notification_sent'
+      : 'NULL AS last_notification_sent';
+
+    const migrate = db.transaction(() => {
+      db.exec('DROP TABLE IF EXISTS todos__migration;');
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS todos__migration (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
+          due_date TEXT,
+          is_completed INTEGER NOT NULL DEFAULT 0,
+          completed_at TEXT,
+          is_recurring INTEGER NOT NULL DEFAULT 0,
+          recurrence_pattern TEXT CHECK (recurrence_pattern IN ('daily','weekly','monthly','yearly')),
+          reminder_minutes INTEGER,
+          last_notification_sent TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      `);
+
+      db.exec(`
+        INSERT INTO todos__migration (
+          id,
+          user_id,
+          title,
+          description,
+          priority,
+          due_date,
+          is_completed,
+          completed_at,
+          is_recurring,
+          recurrence_pattern,
+          reminder_minutes,
+          last_notification_sent,
+          created_at,
+          updated_at
+        )
+        SELECT
+          id,
+          user_id,
+          title,
+          description,
+          CASE WHEN priority IN ('high','medium','low') THEN priority ELSE 'medium' END,
+          due_date,
+          is_completed,
+          completed_at,
+          is_recurring,
+          CASE WHEN recurrence_pattern IN ('daily','weekly','monthly','yearly') THEN recurrence_pattern ELSE NULL END,
+          reminder_minutes,
+          ${lastNotificationSelect},
+          created_at,
+          updated_at
+        FROM todos;
+      `);
+
+      db.exec('DROP TABLE todos;');
+      db.exec('ALTER TABLE todos__migration RENAME TO todos;');
+    });
+
+    migrate();
+  } else if (!hasLastNotificationColumn) {
+    db.exec('ALTER TABLE todos ADD COLUMN last_notification_sent TEXT;');
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_todos_user_id ON todos(user_id);
+    CREATE INDEX IF NOT EXISTS idx_todos_due_date ON todos(due_date);
+    CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(is_completed);
+    CREATE INDEX IF NOT EXISTS idx_todos_priority ON todos(user_id, priority);
+  `);
+}
 
 export type Priority = 'high' | 'medium' | 'low';
 export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
@@ -65,6 +165,7 @@ export interface Todo {
   isRecurring: boolean;
   recurrencePattern: RecurrencePattern | null;
   reminderMinutes: number | null;
+  lastNotificationSent: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -81,6 +182,7 @@ type TodoRow = {
   is_recurring: 0 | 1;
   recurrence_pattern: RecurrencePattern | null;
   reminder_minutes: number | null;
+  last_notification_sent: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -98,6 +200,7 @@ function mapTodo(row: TodoRow): Todo {
     isRecurring: Boolean(row.is_recurring),
     recurrencePattern: row.recurrence_pattern,
     reminderMinutes: row.reminder_minutes,
+    lastNotificationSent: row.last_notification_sent,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -111,9 +214,28 @@ function singaporeUtcIso(): string {
   return iso;
 }
 
-const selectTodos = db.prepare<TodoRow[]>(`SELECT * FROM todos WHERE user_id = ? ORDER BY is_completed ASC, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC, due_date IS NULL ASC, due_date ASC`);
+const selectTodos = db.prepare<TodoRow[]>(`
+  SELECT *
+  FROM todos
+  WHERE user_id = ?
+  ORDER BY
+    is_completed ASC,
+    CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC,
+    due_date IS NULL ASC,
+    due_date ASC,
+    created_at ASC
+`);
 
 const selectTodoById = db.prepare<TodoRow | undefined>(`SELECT * FROM todos WHERE id = ? AND user_id = ?`);
+
+const selectReminderCandidates = db.prepare<TodoRow[]>(`
+  SELECT *
+  FROM todos
+  WHERE user_id = ?
+    AND reminder_minutes IS NOT NULL
+    AND due_date IS NOT NULL
+    AND is_completed = 0
+`);
 
 const insertTodo = db.prepare(`
   INSERT INTO todos (
@@ -125,9 +247,10 @@ const insertTodo = db.prepare(`
     is_recurring,
     recurrence_pattern,
     reminder_minutes,
+    last_notification_sent,
     created_at,
     updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateTodoStmt = db.prepare(`
@@ -142,11 +265,17 @@ const updateTodoStmt = db.prepare(`
     is_recurring = COALESCE(@is_recurring, is_recurring),
     recurrence_pattern = CASE WHEN @recurrence_pattern = '__NULL__' THEN NULL ELSE COALESCE(@recurrence_pattern, recurrence_pattern) END,
     reminder_minutes = CASE WHEN @reminder_minutes = '__NULL__' THEN NULL ELSE COALESCE(@reminder_minutes, reminder_minutes) END,
+    last_notification_sent = CASE WHEN @last_notification_sent = '__NULL__' THEN NULL ELSE COALESCE(@last_notification_sent, last_notification_sent) END,
     updated_at = @updated_at
   WHERE id = @id AND user_id = @user_id
 `);
 
 const deleteTodoStmt = db.prepare(`DELETE FROM todos WHERE id = ? AND user_id = ?`);
+const markNotificationSentStmt = db.prepare(`
+  UPDATE todos
+  SET last_notification_sent = ?, updated_at = ?
+  WHERE id = ? AND user_id = ?
+`);
 
 export const todoDB = {
   create(args: {
@@ -170,6 +299,7 @@ export const todoDB = {
       args.isRecurring ? 1 : 0,
       args.recurrencePattern,
       args.reminderMinutes,
+      null,
       now,
       now
     );
@@ -184,6 +314,11 @@ export const todoDB = {
 
   listByUser(userId: number): Todo[] {
     const rows = selectTodos.all(userId) as TodoRow[];
+    return rows.map(mapTodo);
+  },
+
+  listReminderCandidates(userId: number): Todo[] {
+    const rows = selectReminderCandidates.all(userId) as TodoRow[];
     return rows.map(mapTodo);
   },
 
@@ -207,6 +342,7 @@ export const todoDB = {
       is_recurring: data.isRecurring === undefined ? null : data.isRecurring ? 1 : 0,
       recurrence_pattern: data.recurrencePattern === null ? '__NULL__' : data.recurrencePattern ?? null,
       reminder_minutes: data.reminderMinutes === null ? '__NULL__' : data.reminderMinutes ?? null,
+      last_notification_sent: data.lastNotificationSent === null ? '__NULL__' : data.lastNotificationSent ?? null,
       updated_at: now
     });
 
@@ -222,6 +358,20 @@ export const todoDB = {
     deleteTodoStmt.run(id, userId);
   },
 
+  markNotificationsSent(userId: number, todoIds: number[], sentAtIso: string): void {
+    if (todoIds.length === 0) {
+      return;
+    }
+
+    const apply = db.transaction((ids: number[]) => {
+      for (const todoId of ids) {
+        markNotificationSentStmt.run(sentAtIso, sentAtIso, todoId, userId);
+      }
+    });
+
+    apply(todoIds);
+  },
+
   toggleComplete(id: number, userId: number, isCompleted: boolean): Todo {
     const now = singaporeUtcIso();
 
@@ -230,6 +380,7 @@ export const todoDB = {
       user_id: userId,
       is_completed: isCompleted ? 1 : 0,
       completed_at: isCompleted ? now : '__NULL__',
+      last_notification_sent: null,
       updated_at: now
     });
 
