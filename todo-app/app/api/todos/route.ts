@@ -172,7 +172,7 @@ export async function POST(request: NextRequest) {
     }
 
     return { todo: created };
-  });
+  })();
 
   return NextResponse.json(result, { status: 201 });
 }
