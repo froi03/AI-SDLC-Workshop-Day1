@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { DateTime } from 'luxon';
-import type { Priority, RecurrencePattern, Tag, TagWithCounts, Todo } from '@/lib/db';
+import type { Priority, ProgressStats, RecurrencePattern, Subtask, Tag, TagWithCounts, Todo } from '@/lib/db';
 import { useNotifications } from '@/lib/hooks/useNotifications';
 import { formatSingaporeDate, getSingaporeNow } from '@/lib/timezone';
 
@@ -155,6 +155,15 @@ function groupTodos(todos: Todo[]) {
   return { overdue, active, completed };
 }
 
+function sortSubtasks(subtasks: Subtask[]): Subtask[] {
+  return [...subtasks].sort((a, b) => {
+    if (a.position !== b.position) {
+      return a.position - b.position;
+    }
+    return a.id - b.id;
+  });
+}
+
 function singaporeNowUtcIso(): string {
   const iso = getSingaporeNow().toUTC().toISO();
   if (!iso) {
@@ -181,6 +190,13 @@ export default function TodoPage() {
   const [tagDeleteTarget, setTagDeleteTarget] = useState<TagWithCounts | null>(null);
   const [tagDeleteLoading, setTagDeleteLoading] = useState(false);
   const [editingTagSelection, setEditingTagSelection] = useState<number[]>([]);
+  const [subtaskInputs, setSubtaskInputs] = useState<Record<number, string>>({});
+  const [subtaskErrors, setSubtaskErrors] = useState<Record<number, string | null>>({});
+  const [editingSubtaskId, setEditingSubtaskId] = useState<number | null>(null);
+  const [subtaskEditDrafts, setSubtaskEditDrafts] = useState<Record<number, string>>({});
+  const [creatingSubtaskTodoIds, setCreatingSubtaskTodoIds] = useState<number[]>([]);
+  const [updatingSubtaskIds, setUpdatingSubtaskIds] = useState<number[]>([]);
+  const [expandedTodoIds, setExpandedTodoIds] = useState<number[]>([]);
   const {
     isSupported: notificationsSupported,
     permission: notificationPermission,
@@ -233,7 +249,23 @@ export default function TodoPage() {
         throw new Error('Failed to load todos');
       }
       const data = await response.json();
-      setTodos(data.todos ?? []);
+      const retrieved = (data.todos ?? []) as Todo[];
+      setTodos(retrieved);
+      setExpandedTodoIds((prev) => {
+        const next = new Set(prev);
+        for (const todo of retrieved) {
+          if (todo.subtasks.length > 0) {
+            next.add(todo.id);
+          }
+        }
+        return Array.from(next);
+      });
+      setSubtaskInputs({});
+      setSubtaskErrors({});
+      setEditingSubtaskId(null);
+      setSubtaskEditDrafts({});
+      setCreatingSubtaskTodoIds([]);
+      setUpdatingSubtaskIds([]);
       setUiState({ loading: false, error: null });
     } catch (error) {
       setUiState({ loading: false, error: (error as Error).message });
@@ -307,6 +339,8 @@ export default function TodoPage() {
       reminderMinutes: payload.reminderMinutes,
       lastNotificationSent: null,
       tags: selectedTags,
+      subtasks: [],
+      progress: { completed: 0, total: 0, percent: 0 },
       createdAt: optimisticTimestamp,
       updatedAt: optimisticTimestamp
     };
@@ -506,6 +540,36 @@ export default function TodoPage() {
   const handleDelete = async (todo: Todo) => {
     const current = todos;
     setTodos((prev) => prev.filter((item) => item.id !== todo.id));
+    setSubtaskInputs((prev) => {
+      if (!(todo.id in prev)) {
+        return prev;
+      }
+      const { [todo.id]: _removed, ...rest } = prev;
+      return rest;
+    });
+    setSubtaskErrors((prev) => {
+      if (!(todo.id in prev)) {
+        return prev;
+      }
+      const { [todo.id]: _removed, ...rest } = prev;
+      return rest;
+    });
+    setExpandedTodoIds((prev) => prev.filter((id) => id !== todo.id));
+    setCreatingSubtaskTodoIds((prev) => prev.filter((id) => id !== todo.id));
+    setUpdatingSubtaskIds((prev) => prev.filter((id) => !todo.subtasks.some((subtask) => subtask.id === id)));
+    setSubtaskEditDrafts((prev) => {
+      if (todo.subtasks.length === 0) {
+        return prev;
+      }
+      const copy = { ...prev };
+      for (const subtask of todo.subtasks) {
+        delete copy[subtask.id];
+      }
+      return copy;
+    });
+    if (editingSubtaskId != null && todo.subtasks.some((subtask) => subtask.id === editingSubtaskId)) {
+      setEditingSubtaskId(null);
+    }
 
     try {
       const response = await fetch(`/api/todos/${todo.id}`, { method: 'DELETE' });
@@ -521,6 +585,216 @@ export default function TodoPage() {
 
   const toggleEditingTagSelection = (tagId: number) => {
     setEditingTagSelection((prev) => (prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]));
+  };
+
+  const applySubtaskState = (todoId: number, updater: (todo: Todo) => Todo) => {
+    setTodos((prev) => prev.map((todo) => (todo.id === todoId ? updater(todo) : todo)));
+    setEditing((current) => {
+      if (!current || current.id !== todoId) {
+        return current;
+      }
+      return updater(current);
+    });
+  };
+
+  const addCreatingTodo = (todoId: number) => {
+    setCreatingSubtaskTodoIds((prev) => (prev.includes(todoId) ? prev : [...prev, todoId]));
+  };
+
+  const removeCreatingTodo = (todoId: number) => {
+    setCreatingSubtaskTodoIds((prev) => prev.filter((id) => id !== todoId));
+  };
+
+  const addUpdatingSubtask = (subtaskId: number) => {
+    setUpdatingSubtaskIds((prev) => (prev.includes(subtaskId) ? prev : [...prev, subtaskId]));
+  };
+
+  const removeUpdatingSubtask = (subtaskId: number) => {
+    setUpdatingSubtaskIds((prev) => prev.filter((id) => id !== subtaskId));
+  };
+
+  const handleToggleSubtaskSection = (todoId: number) => {
+    setExpandedTodoIds((prev) => (prev.includes(todoId) ? prev.filter((id) => id !== todoId) : [...prev, todoId]));
+  };
+
+  const handleSubtaskDraftChange = (todoId: number, value: string) => {
+    setSubtaskInputs((prev) => ({ ...prev, [todoId]: value }));
+    setSubtaskErrors((prev) => ({ ...prev, [todoId]: null }));
+  };
+
+  const handleSubtaskEditDraftChange = (subtaskId: number, value: string) => {
+    setSubtaskEditDrafts((prev) => ({ ...prev, [subtaskId]: value }));
+  };
+
+  const handleCreateSubtask = async (todo: Todo) => {
+    const draft = (subtaskInputs[todo.id] ?? '').trim();
+    if (draft.length === 0) {
+      setSubtaskErrors((prev) => ({ ...prev, [todo.id]: 'Subtask title is required' }));
+      return;
+    }
+
+    addCreatingTodo(todo.id);
+
+    try {
+      const response = await fetch(`/api/todos/${todo.id}/subtasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: draft })
+      });
+      const raw = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok || raw == null || typeof raw !== 'object') {
+        throw new Error('Failed to create subtask');
+      }
+      if ('error' in raw) {
+        const message = (raw as { error?: string }).error;
+        throw new Error(message ?? 'Failed to create subtask');
+      }
+      const { subtask, progress } = raw as { subtask: Subtask; progress: ProgressStats };
+      applySubtaskState(todo.id, (current) => {
+        const nextSubtasks = sortSubtasks([
+          ...current.subtasks.filter((item) => item.id !== subtask.id),
+          subtask
+        ]);
+        return { ...current, subtasks: nextSubtasks, progress };
+      });
+      setSubtaskInputs((prev) => ({ ...prev, [todo.id]: '' }));
+      setSubtaskErrors((prev) => ({ ...prev, [todo.id]: null }));
+      setExpandedTodoIds((prev) => (prev.includes(todo.id) ? prev : [...prev, todo.id]));
+    } catch (error) {
+      setSubtaskErrors((prev) => ({ ...prev, [todo.id]: (error as Error).message }));
+    } finally {
+      removeCreatingTodo(todo.id);
+    }
+  };
+
+  const handleStartSubtaskEdit = (todoId: number, subtask: Subtask) => {
+    setEditingSubtaskId(subtask.id);
+    setSubtaskEditDrafts((prev) => ({ ...prev, [subtask.id]: subtask.title }));
+    setSubtaskErrors((prev) => ({ ...prev, [todoId]: null }));
+  };
+
+  const handleCancelSubtaskEdit = () => {
+    setSubtaskEditDrafts((prev) => {
+      if (editingSubtaskId == null) {
+        return prev;
+      }
+      const { [editingSubtaskId]: _removed, ...rest } = prev;
+      return rest;
+    });
+    setEditingSubtaskId(null);
+  };
+
+  const handleSaveSubtaskEdit = async (todoId: number, subtask: Subtask) => {
+    const draft = (subtaskEditDrafts[subtask.id] ?? '').trim();
+    if (draft.length === 0) {
+      setSubtaskErrors((prev) => ({ ...prev, [todoId]: 'Subtask title is required' }));
+      return;
+    }
+
+    addUpdatingSubtask(subtask.id);
+
+    try {
+      const response = await fetch(`/api/subtasks/${subtask.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: draft })
+      });
+      const raw = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok || raw == null || typeof raw !== 'object') {
+        throw new Error('Failed to update subtask');
+      }
+      if ('error' in raw) {
+        const message = (raw as { error?: string }).error;
+        throw new Error(message ?? 'Failed to update subtask');
+      }
+      const { subtask: updatedSubtask, progress } = raw as { subtask: Subtask; progress: ProgressStats };
+      applySubtaskState(todoId, (current) => {
+        const nextSubtasks = sortSubtasks([
+          ...current.subtasks.filter((item) => item.id !== updatedSubtask.id),
+          updatedSubtask
+        ]);
+        return { ...current, subtasks: nextSubtasks, progress };
+      });
+      setSubtaskErrors((prev) => ({ ...prev, [todoId]: null }));
+      setSubtaskEditDrafts((prev) => {
+        const { [subtask.id]: _removed, ...rest } = prev;
+        return rest;
+      });
+      setEditingSubtaskId(null);
+    } catch (error) {
+      setSubtaskErrors((prev) => ({ ...prev, [todoId]: (error as Error).message }));
+    } finally {
+      removeUpdatingSubtask(subtask.id);
+    }
+  };
+
+  const handleToggleSubtask = async (todo: Todo, subtask: Subtask, isCompleted: boolean) => {
+    addUpdatingSubtask(subtask.id);
+
+    try {
+      const response = await fetch(`/api/subtasks/${subtask.id}/toggle`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isCompleted })
+      });
+      const raw = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok || raw == null || typeof raw !== 'object') {
+        throw new Error('Failed to toggle subtask');
+      }
+      if ('error' in raw) {
+        const message = (raw as { error?: string }).error;
+        throw new Error(message ?? 'Failed to toggle subtask');
+      }
+      const { subtask: updatedSubtask, progress } = raw as { subtask: Subtask; progress: ProgressStats };
+      applySubtaskState(todo.id, (current) => {
+        const nextSubtasks = sortSubtasks([
+          ...current.subtasks.filter((item) => item.id !== updatedSubtask.id),
+          updatedSubtask
+        ]);
+        return { ...current, subtasks: nextSubtasks, progress };
+      });
+      setSubtaskErrors((prev) => ({ ...prev, [todo.id]: null }));
+    } catch (error) {
+      setSubtaskErrors((prev) => ({ ...prev, [todo.id]: (error as Error).message }));
+    } finally {
+      removeUpdatingSubtask(subtask.id);
+    }
+  };
+
+  const handleDeleteSubtask = async (todoId: number, subtask: Subtask) => {
+    addUpdatingSubtask(subtask.id);
+
+    try {
+      const response = await fetch(`/api/subtasks/${subtask.id}`, { method: 'DELETE' });
+      const raw = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok || raw == null || typeof raw !== 'object') {
+        throw new Error('Failed to delete subtask');
+      }
+      if ('error' in raw) {
+        const message = (raw as { error?: string }).error;
+        throw new Error(message ?? 'Failed to delete subtask');
+      }
+      const { progress } = raw as { progress: ProgressStats };
+      applySubtaskState(todoId, (current) => {
+        const nextSubtasks = current.subtasks.filter((item) => item.id !== subtask.id);
+        return { ...current, subtasks: sortSubtasks(nextSubtasks), progress };
+      });
+      setSubtaskErrors((prev) => ({ ...prev, [todoId]: null }));
+      setSubtaskEditDrafts((prev) => {
+        const { [subtask.id]: _removed, ...rest } = prev;
+        return rest;
+      });
+      if (editingSubtaskId === subtask.id) {
+        setEditingSubtaskId(null);
+      }
+      if (progress.total === 0) {
+        setExpandedTodoIds((prev) => prev.filter((id) => id !== todoId));
+      }
+    } catch (error) {
+      setSubtaskErrors((prev) => ({ ...prev, [todoId]: (error as Error).message }));
+    } finally {
+      removeUpdatingSubtask(subtask.id);
+    }
   };
 
   const openEdit = (todo: Todo) => {
@@ -988,6 +1262,22 @@ export default function TodoPage() {
           onDelete={handleDelete}
           onTagClick={handleTagFilterToggle}
           activeTagId={tagFilter}
+          subtaskDrafts={subtaskInputs}
+          subtaskErrors={subtaskErrors}
+          subtaskEditDrafts={subtaskEditDrafts}
+          editingSubtaskId={editingSubtaskId}
+          expandedTodoIds={expandedTodoIds}
+          creatingSubtaskIds={creatingSubtaskTodoIds}
+          updatingSubtaskIds={updatingSubtaskIds}
+          onToggleSubtaskSection={handleToggleSubtaskSection}
+          onSubtaskDraftChange={handleSubtaskDraftChange}
+          onCreateSubtask={handleCreateSubtask}
+          onStartSubtaskEdit={handleStartSubtaskEdit}
+          onCancelSubtaskEdit={handleCancelSubtaskEdit}
+          onSaveSubtaskEdit={handleSaveSubtaskEdit}
+          onSubtaskEditDraftChange={handleSubtaskEditDraftChange}
+          onToggleSubtask={handleToggleSubtask}
+          onDeleteSubtask={handleDeleteSubtask}
         />
         <TodoSection
           title="Active"
@@ -999,6 +1289,22 @@ export default function TodoPage() {
           onDelete={handleDelete}
           onTagClick={handleTagFilterToggle}
           activeTagId={tagFilter}
+          subtaskDrafts={subtaskInputs}
+          subtaskErrors={subtaskErrors}
+          subtaskEditDrafts={subtaskEditDrafts}
+          editingSubtaskId={editingSubtaskId}
+          expandedTodoIds={expandedTodoIds}
+          creatingSubtaskIds={creatingSubtaskTodoIds}
+          updatingSubtaskIds={updatingSubtaskIds}
+          onToggleSubtaskSection={handleToggleSubtaskSection}
+          onSubtaskDraftChange={handleSubtaskDraftChange}
+          onCreateSubtask={handleCreateSubtask}
+          onStartSubtaskEdit={handleStartSubtaskEdit}
+          onCancelSubtaskEdit={handleCancelSubtaskEdit}
+          onSaveSubtaskEdit={handleSaveSubtaskEdit}
+          onSubtaskEditDraftChange={handleSubtaskEditDraftChange}
+          onToggleSubtask={handleToggleSubtask}
+          onDeleteSubtask={handleDeleteSubtask}
         />
         <TodoSection
           title="Completed"
@@ -1010,6 +1316,22 @@ export default function TodoPage() {
           onDelete={handleDelete}
           onTagClick={handleTagFilterToggle}
           activeTagId={tagFilter}
+          subtaskDrafts={subtaskInputs}
+          subtaskErrors={subtaskErrors}
+          subtaskEditDrafts={subtaskEditDrafts}
+          editingSubtaskId={editingSubtaskId}
+          expandedTodoIds={expandedTodoIds}
+          creatingSubtaskIds={creatingSubtaskTodoIds}
+          updatingSubtaskIds={updatingSubtaskIds}
+          onToggleSubtaskSection={handleToggleSubtaskSection}
+          onSubtaskDraftChange={handleSubtaskDraftChange}
+          onCreateSubtask={handleCreateSubtask}
+          onStartSubtaskEdit={handleStartSubtaskEdit}
+          onCancelSubtaskEdit={handleCancelSubtaskEdit}
+          onSaveSubtaskEdit={handleSaveSubtaskEdit}
+          onSubtaskEditDraftChange={handleSubtaskEditDraftChange}
+          onToggleSubtask={handleToggleSubtask}
+          onDeleteSubtask={handleDeleteSubtask}
         />
       </section>
 
@@ -1328,6 +1650,22 @@ interface TodoSectionProps {
   onDelete: (todo: Todo) => void;
   onTagClick: (tagId: number) => void;
   activeTagId: number | null;
+  subtaskDrafts: Record<number, string>;
+  subtaskErrors: Record<number, string | null>;
+  subtaskEditDrafts: Record<number, string>;
+  editingSubtaskId: number | null;
+  expandedTodoIds: number[];
+  creatingSubtaskIds: number[];
+  updatingSubtaskIds: number[];
+  onToggleSubtaskSection: (todoId: number) => void;
+  onSubtaskDraftChange: (todoId: number, value: string) => void;
+  onCreateSubtask: (todo: Todo) => void;
+  onStartSubtaskEdit: (todoId: number, subtask: Subtask) => void;
+  onCancelSubtaskEdit: () => void;
+  onSaveSubtaskEdit: (todoId: number, subtask: Subtask) => void;
+  onSubtaskEditDraftChange: (subtaskId: number, value: string) => void;
+  onToggleSubtask: (todo: Todo, subtask: Subtask, isCompleted: boolean) => void;
+  onDeleteSubtask: (todoId: number, subtask: Subtask) => void;
 }
 
 function TodoSection({
@@ -1339,7 +1677,23 @@ function TodoSection({
   onEdit,
   onDelete,
   onTagClick,
-  activeTagId
+  activeTagId,
+  subtaskDrafts,
+  subtaskErrors,
+  subtaskEditDrafts,
+  editingSubtaskId,
+  expandedTodoIds,
+  creatingSubtaskIds,
+  updatingSubtaskIds,
+  onToggleSubtaskSection,
+  onSubtaskDraftChange,
+  onCreateSubtask,
+  onStartSubtaskEdit,
+  onCancelSubtaskEdit,
+  onSaveSubtaskEdit,
+  onSubtaskEditDraftChange,
+  onToggleSubtask,
+  onDeleteSubtask
 }: TodoSectionProps) {
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
@@ -1355,71 +1709,234 @@ function TodoSection({
         <p className="mt-6 text-sm text-slate-400">{emptyMessage}</p>
       ) : (
         <ul className="mt-6 flex flex-col gap-3">
-          {todos.map((todo) => (
-            <li key={todo.id} className="rounded border border-slate-800 bg-slate-950/60 p-4">
-              <div className="flex items-start justify-between gap-4">
-                <label className="flex flex-1 items-start gap-3">
-                  <input
-                    type="checkbox"
-                    checked={todo.isCompleted}
-                    onChange={() => onToggle(todo)}
-                    className="mt-1"
-                    aria-label={`Mark ${todo.title} as ${todo.isCompleted ? 'incomplete' : 'complete'}`}
-                  />
-                  <div className="flex-1">
-                    <h3 className="text-base font-medium">{todo.title}</h3>
-                    {todo.description && <p className="mt-1 text-sm text-slate-300">{todo.description}</p>}
-                    <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                      <PriorityBadge priority={todo.priority} />
-                      <span>{todo.dueDate ? `Due ${formatSingaporeDate(todo.dueDate)}` : 'No due date'}</span>
-                      {todo.isRecurring && todo.recurrencePattern && (
-                        <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-300">
-                          Repeats {todo.recurrencePattern.toUpperCase()}
-                        </span>
-                      )}
-                      {todo.reminderMinutes != null && <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">Reminder {todo.reminderMinutes}m</span>}
-                    </div>
-                    {todo.tags.length > 0 && (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {todo.tags.map((tag) => {
-                          const active = activeTagId === tag.id;
-                          const style = getTagBadgeStyle(tag.color);
-                          return (
-                            <button
-                              key={tag.id}
-                              type="button"
-                              onClick={() => onTagClick(tag.id)}
-                              className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide transition ${
-                                active ? 'shadow-[0_0_0_1px_rgba(52,211,153,0.5)]' : 'border-transparent'
-                              }`}
-                              style={style}
-                              aria-pressed={active}
-                            >
-                              {tag.name}
-                            </button>
-                          );
-                        })}
+          {todos.map((todo) => {
+            const isExpanded = expandedTodoIds.includes(todo.id);
+            const subtaskDraft = subtaskDrafts[todo.id] ?? '';
+            const subtaskError = subtaskErrors[todo.id] ?? null;
+            const isCreating = creatingSubtaskIds.includes(todo.id);
+            return (
+              <li key={todo.id} className="rounded border border-slate-800 bg-slate-950/60 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <label className="flex flex-1 items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={todo.isCompleted}
+                      onChange={() => onToggle(todo)}
+                      className="mt-1"
+                      aria-label={`Mark ${todo.title} as ${todo.isCompleted ? 'incomplete' : 'complete'}`}
+                    />
+                    <div className="flex-1">
+                      <h3 className="text-base font-medium">{todo.title}</h3>
+                      {todo.description && <p className="mt-1 text-sm text-slate-300">{todo.description}</p>}
+                      <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                        <PriorityBadge priority={todo.priority} />
+                        <span>{todo.dueDate ? `Due ${formatSingaporeDate(todo.dueDate)}` : 'No due date'}</span>
+                        {todo.isRecurring && todo.recurrencePattern && (
+                          <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-300">
+                            Repeats {todo.recurrencePattern.toUpperCase()}
+                          </span>
+                        )}
+                        {todo.reminderMinutes != null && (
+                          <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">Reminder {todo.reminderMinutes}m</span>
+                        )}
                       </div>
-                    )}
+                      {todo.tags.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {todo.tags.map((tag) => {
+                            const active = activeTagId === tag.id;
+                            const style = getTagBadgeStyle(tag.color);
+                            return (
+                              <button
+                                key={tag.id}
+                                type="button"
+                                onClick={() => onTagClick(tag.id)}
+                                className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide transition ${
+                                  active ? 'shadow-[0_0_0_1px_rgba(52,211,153,0.5)]' : 'border-transparent'
+                                }`}
+                                style={style}
+                                aria-pressed={active}
+                              >
+                                {tag.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      className="rounded border border-slate-700 px-3 py-1 text-xs"
+                      onClick={() => onEdit(todo)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="rounded border border-red-600 px-3 py-1 text-xs text-red-200"
+                      onClick={() => onDelete(todo)}
+                    >
+                      Delete
+                    </button>
                   </div>
-                </label>
-                <div className="flex flex-col gap-2">
-                  <button
-                    className="rounded border border-slate-700 px-3 py-1 text-xs"
-                    onClick={() => onEdit(todo)}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="rounded border border-red-600 px-3 py-1 text-xs text-red-200"
-                    onClick={() => onDelete(todo)}
-                  >
-                    Delete
-                  </button>
                 </div>
-              </div>
-            </li>
-          ))}
+
+                <div className="mt-4 rounded border border-slate-800 bg-slate-950/40">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-300"
+                    onClick={() => onToggleSubtaskSection(todo.id)}
+                    aria-expanded={isExpanded}
+                  >
+                    <span>Subtasks</span>
+                    <span className="text-[11px] text-slate-400">
+                      {todo.progress.total > 0
+                        ? `${todo.progress.completed}/${todo.progress.total} · ${todo.progress.percent}%`
+                        : 'No subtasks yet'}
+                    </span>
+                  </button>
+                  {isExpanded && (
+                    <div className="border-t border-slate-800 p-3">
+                      {todo.progress.total > 0 ? (
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-slate-300">
+                            <span>
+                              {todo.progress.completed}/{todo.progress.total} completed
+                            </span>
+                            <span>{todo.progress.percent}%</span>
+                          </div>
+                          <div
+                            className="mt-1 h-2 w-full rounded bg-slate-800"
+                            role="progressbar"
+                            aria-valuenow={todo.progress.percent}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                          >
+                            <div
+                              className={`h-full rounded ${todo.progress.percent === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                              style={{ width: `${todo.progress.percent}%` }}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-slate-400">No subtasks yet</p>
+                      )}
+
+                      <form
+                        className="mt-3 flex gap-2"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          onCreateSubtask(todo);
+                        }}
+                      >
+                        <input
+                          type="text"
+                          value={subtaskDraft}
+                          onChange={(event) => onSubtaskDraftChange(todo.id, event.target.value)}
+                          maxLength={200}
+                          placeholder="Add a subtask..."
+                          className="flex-1 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                        />
+                        <button
+                          type="submit"
+                          className="rounded bg-blue-600 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white disabled:opacity-60"
+                          disabled={isCreating}
+                        >
+                          Add
+                        </button>
+                      </form>
+                      {subtaskError && <p className="mt-2 text-xs text-red-400">{subtaskError}</p>}
+
+                      {todo.subtasks.length > 0 && (
+                        <ul className="mt-4 flex flex-col gap-2">
+                          {todo.subtasks.map((subtask) => {
+                            const isEditingSubtask = editingSubtaskId === subtask.id;
+                            const draftValue = subtaskEditDrafts[subtask.id] ?? subtask.title;
+                            const isUpdating = updatingSubtaskIds.includes(subtask.id);
+                            return (
+                              <li key={subtask.id} className="rounded border border-slate-800 bg-slate-950/70 p-3">
+                                <div className="flex items-start gap-3">
+                                  <input
+                                    type="checkbox"
+                                    className="mt-1"
+                                    checked={subtask.isCompleted}
+                                    disabled={isUpdating}
+                                    onChange={(event) => onToggleSubtask(todo, subtask, event.target.checked)}
+                                    aria-label={`Mark ${subtask.title} as ${subtask.isCompleted ? 'incomplete' : 'complete'}`}
+                                  />
+                                  <div className="flex-1">
+                                    {isEditingSubtask ? (
+                                      <form
+                                        onSubmit={(event) => {
+                                          event.preventDefault();
+                                          onSaveSubtaskEdit(todo.id, subtask);
+                                        }}
+                                      >
+                                        <input
+                                          type="text"
+                                          value={draftValue}
+                                          onChange={(event) => onSubtaskEditDraftChange(subtask.id, event.target.value)}
+                                          maxLength={200}
+                                          className="w-full rounded border border-blue-500 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                                        />
+                                        <div className="mt-2 flex gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={onCancelSubtaskEdit}
+                                            className="rounded border border-slate-700 px-3 py-1 text-xs"
+                                          >
+                                            Cancel
+                                          </button>
+                                          <button
+                                            type="submit"
+                                            className="rounded bg-blue-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60"
+                                            disabled={isUpdating}
+                                          >
+                                            Save
+                                          </button>
+                                        </div>
+                                      </form>
+                                    ) : (
+                                      <div className="flex items-start justify-between gap-2">
+                                        <div>
+                                          <p
+                                            className={`text-sm ${subtask.isCompleted ? 'text-slate-400 line-through' : 'text-slate-200'}`}
+                                          >
+                                            {subtask.title}
+                                          </p>
+                                          <p className="text-[11px] text-slate-500">Position {subtask.position}</p>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <button
+                                            type="button"
+                                            className="rounded border border-slate-700 px-2 py-1 text-[11px]"
+                                            onClick={() => onStartSubtaskEdit(todo.id, subtask)}
+                                          >
+                                            Rename
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="rounded border border-red-600 px-2 py-1 text-[11px] text-red-300 disabled:opacity-60"
+                                            onClick={() => onDeleteSubtask(todo.id, subtask)}
+                                            disabled={isUpdating}
+                                          >
+                                            Delete
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>

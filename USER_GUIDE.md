@@ -226,7 +226,8 @@ Break down complex todos into smaller, manageable subtasks with real-time progre
 #### Managing Subtasks
 - **Complete**: Click checkbox next to subtask
 - **Uncomplete**: Click checked checkbox to mark incomplete
-- **Delete**: Click **✕** button on right side of subtask
+- **Rename**: Click **"Rename"** to edit the title inline
+- **Delete**: Click **"Delete"** on the right side of the subtask
 - **Collapse**: Click **"▼ Subtasks"** to hide subtask list
 
 ### Progress Tracking
@@ -234,13 +235,13 @@ Break down complex todos into smaller, manageable subtasks with real-time progre
 #### Visual Progress Bar
 - Shows completion percentage (0-100%)
 - Blue progress bar updates in real-time
-- Located below todo title
-- Visible even when subtasks are collapsed
+- Rendered inside the expanded subtasks panel
+- Accessible via ARIA attributes for screen readers
 
 #### Text Indicator
-- Format: `"X/Y subtasks"`
-- Shows completed count / total count
-- Example: `"3/7 subtasks"` = 42% complete
+- Format: `"X/Y · Z%"`
+- Displayed on the Subtasks toggle button even when collapsed
+- Example: `"3/7 · 43%"` (rounded to nearest whole percent)
 
 ### Features
 - ✅ Unlimited subtasks per todo

@@ -46,6 +46,7 @@ db.exec(`
 
 ensureTodoConstraints();
 ensureTagTables();
+ensureSubtaskTables();
 
 const ensureDefaultUser = db.prepare(`
   INSERT INTO users (id, email)
@@ -182,6 +183,26 @@ function ensureTagTables() {
   `);
 }
 
+function ensureSubtaskTables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS subtasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      todo_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      is_completed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (todo_id) REFERENCES todos(id) ON DELETE CASCADE
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_subtasks_todo_id ON subtasks(todo_id);
+    CREATE INDEX IF NOT EXISTS idx_subtasks_position ON subtasks(todo_id, position);
+  `);
+}
+
 export type Priority = 'high' | 'medium' | 'low';
 export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
 
@@ -197,6 +218,22 @@ export interface Tag {
 
 export type TagWithCounts = Tag & { todoCount: number };
 
+export interface Subtask {
+  id: number;
+  todoId: number;
+  title: string;
+  position: number;
+  isCompleted: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ProgressStats = {
+  completed: number;
+  total: number;
+  percent: number;
+};
+
 export interface Todo {
   id: number;
   userId: number;
@@ -211,6 +248,8 @@ export interface Todo {
   reminderMinutes: number | null;
   lastNotificationSent: string | null;
   tags: Tag[];
+  subtasks: Subtask[];
+  progress: ProgressStats;
   createdAt: string;
   updatedAt: string;
 }
@@ -244,6 +283,18 @@ type TagRow = {
 
 type TodoTagRow = TagRow & { todo_id: number };
 
+type SubtaskRow = {
+  id: number;
+  todo_id: number;
+  title: string;
+  position: number;
+  is_completed: 0 | 1;
+  created_at: string;
+  updated_at: string;
+};
+
+type SubtaskJoinRow = SubtaskRow & { user_id: number };
+
 function mapTag(row: TagRow): Tag {
   return {
     id: row.id,
@@ -256,7 +307,30 @@ function mapTag(row: TagRow): Tag {
   };
 }
 
-function mapTodo(row: TodoRow, tags: Tag[] = []): Todo {
+function mapSubtask(row: SubtaskRow): Subtask {
+  return {
+    id: row.id,
+    todoId: row.todo_id,
+    title: row.title,
+    position: row.position,
+    isCompleted: Boolean(row.is_completed),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function calculateProgressStats(subtasks: Subtask[]): ProgressStats {
+  const total = subtasks.length;
+  if (total === 0) {
+    return { completed: 0, total: 0, percent: 0 };
+  }
+  const completed = subtasks.reduce((count, subtask) => (subtask.isCompleted ? count + 1 : count), 0);
+  const percent = Math.round((completed / total) * 100);
+  return { completed, total, percent };
+}
+
+function mapTodo(row: TodoRow, tags: Tag[] = [], subtasks: Subtask[] = []): Todo {
+  const progress = calculateProgressStats(subtasks);
   return {
     id: row.id,
     userId: row.user_id,
@@ -271,6 +345,8 @@ function mapTodo(row: TodoRow, tags: Tag[] = []): Todo {
     reminderMinutes: row.reminder_minutes,
     lastNotificationSent: row.last_notification_sent,
     tags,
+    subtasks,
+    progress,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -311,6 +387,50 @@ function collectTagsForTodos(userId: number, todoIds: number[]): Map<number, Tag
   }
 
   return map;
+}
+
+function collectSubtasksForTodos(userId: number, todoIds: number[]): Map<number, Subtask[]> {
+  const map = new Map<number, Subtask[]>();
+  if (todoIds.length === 0) {
+    return map;
+  }
+
+  const idSet = new Set(todoIds);
+  const rows = selectSubtasksForUserStmt.all(userId) as SubtaskRow[];
+  for (const row of rows) {
+    if (!idSet.has(row.todo_id)) {
+      continue;
+    }
+    const subtask = mapSubtask(row);
+    const existing = map.get(row.todo_id);
+    if (existing) {
+      existing.push(subtask);
+    } else {
+      map.set(row.todo_id, [subtask]);
+    }
+  }
+
+  return map;
+}
+
+function listSubtasksForTodoInternal(todoId: number, userId: number): Subtask[] {
+  ensureTodoRow(todoId, userId);
+  const rows = selectSubtasksByTodoStmt.all(todoId) as SubtaskRow[];
+  return rows.map(mapSubtask);
+}
+
+function calculateProgressForTodo(todoId: number, userId: number): ProgressStats {
+  const stats = selectProgressForTodoStmt.get(todoId, userId) as { total: number; completed: number } | undefined;
+  if (!stats) {
+    return { completed: 0, total: 0, percent: 0 };
+  }
+  const total = stats.total ?? 0;
+  const completed = stats.completed ?? 0;
+  if (total === 0) {
+    return { completed: 0, total: 0, percent: 0 };
+  }
+  const percent = Math.round((completed / total) * 100);
+  return { completed, total, percent };
 }
 
 function ensureTodoRow(id: number, userId: number): TodoRow {
@@ -383,6 +503,77 @@ const markNotificationSentStmt = db.prepare(`
   SET last_notification_sent = ?, updated_at = ?
   WHERE id = ? AND user_id = ?
 `);
+
+const selectSubtasksByTodoStmt = db.prepare<SubtaskRow[]>(`
+  SELECT id, todo_id, title, position, is_completed, created_at, updated_at
+  FROM subtasks
+  WHERE todo_id = ?
+  ORDER BY position ASC, id ASC
+`);
+
+const selectSubtasksForUserStmt = db.prepare<SubtaskRow[]>(`
+  SELECT
+    s.id,
+    s.todo_id,
+    s.title,
+    s.position,
+    s.is_completed,
+    s.created_at,
+    s.updated_at
+  FROM subtasks s
+  INNER JOIN todos t ON t.id = s.todo_id
+  WHERE t.user_id = ?
+  ORDER BY s.todo_id ASC, s.position ASC, s.id ASC
+`);
+
+const selectProgressForTodoStmt = db.prepare<{ total: number; completed: number }>(`
+  SELECT
+    COUNT(*) AS total,
+    SUM(CASE WHEN s.is_completed = 1 THEN 1 ELSE 0 END) AS completed
+  FROM subtasks s
+  INNER JOIN todos t ON t.id = s.todo_id
+  WHERE s.todo_id = ? AND t.user_id = ?
+`);
+
+const selectSubtaskByIdWithUserStmt = db.prepare<SubtaskJoinRow | undefined>(`
+  SELECT
+    s.id,
+    s.todo_id,
+    s.title,
+    s.position,
+    s.is_completed,
+    s.created_at,
+    s.updated_at,
+    t.user_id
+  FROM subtasks s
+  INNER JOIN todos t ON t.id = s.todo_id
+  WHERE s.id = ?
+`);
+
+const insertSubtaskStmt = db.prepare(`
+  INSERT INTO subtasks (todo_id, title, position, is_completed, created_at, updated_at)
+  VALUES (?, ?, ?, 0, ?, ?)
+`);
+
+const updateSubtaskTitleStmt = db.prepare(`
+  UPDATE subtasks
+  SET title = ?, updated_at = ?
+  WHERE id = ?
+`);
+
+const toggleSubtaskCompletionStmt = db.prepare(`
+  UPDATE subtasks
+  SET is_completed = ?, updated_at = ?
+  WHERE id = ?
+`);
+
+const updateSubtaskPositionStmt = db.prepare(`
+  UPDATE subtasks
+  SET position = ?, updated_at = ?
+  WHERE id = ?
+`);
+
+const deleteSubtaskStmt = db.prepare(`DELETE FROM subtasks WHERE id = ?`);
 
 const selectTagsByUserStmt = db.prepare<TagRow[]>(
   `SELECT * FROM tags WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC`
@@ -487,19 +678,22 @@ export const todoDB = {
       throw new Error('Failed to create todo');
     }
 
-    return mapTodo(row, []);
+    return mapTodo(row, [], []);
   },
 
   listByUser(userId: number): Todo[] {
     const rows = selectTodos.all(userId) as TodoRow[];
     const tagMap = collectTagsForTodos(userId, rows.map((row) => row.id));
-    return rows.map((row) => mapTodo(row, tagMap.get(row.id) ?? []));
+    const subtaskMap = collectSubtasksForTodos(userId, rows.map((row) => row.id));
+    return rows.map((row) => mapTodo(row, tagMap.get(row.id) ?? [], subtaskMap.get(row.id) ?? []));
   },
 
   listReminderCandidates(userId: number): Todo[] {
     const rows = selectReminderCandidates.all(userId) as TodoRow[];
-    const tagMap = collectTagsForTodos(userId, rows.map((row) => row.id));
-    return rows.map((row) => mapTodo(row, tagMap.get(row.id) ?? []));
+    const todoIds = rows.map((row) => row.id);
+    const tagMap = collectTagsForTodos(userId, todoIds);
+    const subtaskMap = collectSubtasksForTodos(userId, todoIds);
+    return rows.map((row) => mapTodo(row, tagMap.get(row.id) ?? [], subtaskMap.get(row.id) ?? []));
   },
 
   getById(id: number, userId: number): Todo | undefined {
@@ -508,7 +702,8 @@ export const todoDB = {
       return undefined;
     }
     const tags = listTagsForTodoInternal(id, userId);
-    return mapTodo(row, tags);
+    const subtasks = listSubtasksForTodoInternal(id, userId);
+    return mapTodo(row, tags, subtasks);
   },
 
   update(id: number, userId: number, data: Partial<Omit<Todo, 'id' | 'userId' | 'createdAt' | 'updatedAt'>>): Todo {
@@ -535,8 +730,9 @@ export const todoDB = {
       throw new Error('Todo not found after update');
     }
 
-    const tags = listTagsForTodoInternal(id, userId);
-    return mapTodo(row, tags);
+  const tags = listTagsForTodoInternal(id, userId);
+  const subtasks = listSubtasksForTodoInternal(id, userId);
+  return mapTodo(row, tags, subtasks);
   },
 
   delete(id: number, userId: number): void {
@@ -575,7 +771,8 @@ export const todoDB = {
     }
 
     const tags = listTagsForTodoInternal(id, userId);
-    return mapTodo(row, tags);
+    const subtasks = listSubtasksForTodoInternal(id, userId);
+    return mapTodo(row, tags, subtasks);
   }
 };
 
@@ -601,6 +798,59 @@ function normalizeName(input: string): string {
     throw new Error('Tag name cannot be empty');
   }
   return trimmed;
+}
+
+function normalizeSubtaskTitle(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error('Subtask title is required');
+  }
+  if (trimmed.length > 200) {
+    throw new Error('Subtask title must be at most 200 characters');
+  }
+  return trimmed;
+}
+
+function ensureSubtaskRow(id: number, userId: number): SubtaskJoinRow {
+  const row = selectSubtaskByIdWithUserStmt.get(id) as SubtaskJoinRow | undefined;
+  if (!row || row.user_id !== userId) {
+    throw new Error('Subtask not found');
+  }
+  return row;
+}
+
+function resolveInsertPosition(position: number | undefined, existing: SubtaskRow[]): number {
+  const maxPosition = existing.length === 0 ? 0 : Math.max(...existing.map((row) => row.position));
+  if (position == null || Number.isNaN(position)) {
+    return maxPosition + 1;
+  }
+
+  const normalized = Math.floor(position);
+  if (!Number.isFinite(normalized) || normalized < 1) {
+    return 1;
+  }
+
+  return Math.min(normalized, existing.length + 1);
+}
+
+function normalizeSubtaskPositions(todoId: number): void {
+  const rows = selectSubtasksByTodoStmt.all(todoId) as SubtaskRow[];
+  if (rows.length === 0) {
+    return;
+  }
+
+  const now = singaporeUtcIso();
+  const apply = db.transaction((ordered: SubtaskRow[]) => {
+    let position = 1;
+    for (const row of ordered) {
+      if (row.position !== position) {
+        updateSubtaskPositionStmt.run(position, now, row.id);
+      }
+      position += 1;
+    }
+  });
+
+  apply(rows);
 }
 
 export const tagDB = {
@@ -708,6 +958,86 @@ export const tagDB = {
       rows.push(row);
     }
     return rows.map(mapTag);
+  }
+};
+
+export const subtaskDB = {
+  listByTodo(todoId: number, userId: number): { subtasks: Subtask[]; progress: ProgressStats } {
+    ensureTodoRow(todoId, userId);
+    const rows = selectSubtasksByTodoStmt.all(todoId) as SubtaskRow[];
+    const subtasks = rows.map(mapSubtask);
+    return { subtasks, progress: calculateProgressStats(subtasks) };
+  },
+
+  create(
+    todoId: number,
+    userId: number,
+    input: { title: string; position?: number }
+  ): { subtask: Subtask; progress: ProgressStats } {
+    ensureTodoRow(todoId, userId);
+
+    const now = singaporeUtcIso();
+    const title = normalizeSubtaskTitle(input.title);
+
+    const transaction = db.transaction(() => {
+      const existing = selectSubtasksByTodoStmt.all(todoId) as SubtaskRow[];
+      const position = resolveInsertPosition(input.position, existing);
+      for (const row of existing) {
+        if (row.position >= position) {
+          updateSubtaskPositionStmt.run(row.position + 1, now, row.id);
+        }
+      }
+
+      const result = insertSubtaskStmt.run(todoId, title, position, now, now);
+      return { id: result.lastInsertRowid as number, position };
+    });
+
+    const { id } = transaction();
+    const createdRow = ensureSubtaskRow(id, userId);
+    const subtask = mapSubtask(createdRow);
+    const progress = calculateProgressForTodo(todoId, userId);
+    return { subtask, progress };
+  },
+
+  updateTitle(id: number, userId: number, title: string): { subtask: Subtask; progress: ProgressStats } {
+    const existing = ensureSubtaskRow(id, userId);
+    const normalizedTitle = normalizeSubtaskTitle(title);
+    const now = singaporeUtcIso();
+
+    updateSubtaskTitleStmt.run(normalizedTitle, now, id);
+
+    const updated = ensureSubtaskRow(id, userId);
+    const subtask = mapSubtask(updated);
+    const progress = calculateProgressForTodo(existing.todo_id, userId);
+    return { subtask, progress };
+  },
+
+  toggleCompletion(
+    id: number,
+    userId: number,
+    isCompleted: boolean
+  ): { subtask: Subtask; progress: ProgressStats } {
+    const existing = ensureSubtaskRow(id, userId);
+    const now = singaporeUtcIso();
+
+    toggleSubtaskCompletionStmt.run(isCompleted ? 1 : 0, now, id);
+
+    const updated = ensureSubtaskRow(id, userId);
+    const subtask = mapSubtask(updated);
+    const progress = calculateProgressForTodo(existing.todo_id, userId);
+    return { subtask, progress };
+  },
+
+  delete(id: number, userId: number): ProgressStats {
+    const existing = ensureSubtaskRow(id, userId);
+    deleteSubtaskStmt.run(id);
+    normalizeSubtaskPositions(existing.todo_id);
+    return calculateProgressForTodo(existing.todo_id, userId);
+  },
+
+  getProgress(todoId: number, userId: number): ProgressStats {
+    ensureTodoRow(todoId, userId);
+    return calculateProgressForTodo(todoId, userId);
   }
 };
 
