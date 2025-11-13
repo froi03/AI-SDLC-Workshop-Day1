@@ -74,6 +74,7 @@ export default function LoginPage() {
 
   const redirectToNext = useCallback(() => {
     router.replace(nextUrl as Route);
+    router.refresh();
   }, [nextUrl, router]);
 
   const handleRegister = useCallback(
