@@ -1,89 +1,83 @@
-# Feature 10 – Calendar View (PRP)
+# PRP 10 · Calendar View
 
-## Objective
-- Provide a monthly calendar interface that visualizes todos by due date, highlights Singapore public holidays, and supports navigation across months while respecting the project’s timezone and styling conventions.
-
-## Background & Context
-- The application uses Next.js 16 App Router; `/calendar` is a client page protected by `middleware.ts` (requires authenticated session).
-- Due dates and holiday calculations must use helpers from `lib/timezone.ts` (`getSingaporeNow`, `formatSingaporeDate`, etc.).
-- Holiday data resides in the SQLite `holidays` table (seeded via `scripts/seed-holidays.ts`); API access provided via `app/api/holidays`.
-- Main todo list state lives in `app/page.tsx`; calendar view pulls todos via API (reuse existing endpoints or add dedicated read API if needed).
+## Feature Overview
+The calendar view presents todos on a monthly grid, highlighting due dates, weekends, and Singapore public holidays. Users can navigate months, inspect day details, and visualize workload distribution alongside holiday data.
 
 ## User Stories
-- "As a user, I want to see all my todos laid out on a monthly calendar so I can plan my week." 
-- "As someone observing Singapore holidays, I want those dates highlighted so I avoid scheduling conflicts." 
-- "As a planner, I want to navigate between months quickly to review upcoming deadlines." 
-- "As a busy user, I need to click a day and see the todos due on that date without leaving the calendar." 
+- **Project Planner**: “I want to see all upcoming deadlines for the month on a calendar.”
+- **Vacation Planner**: “Show public holidays so I can schedule tasks around them.”
+- **Team Lead**: “Click a date to view todos due that day and reassign work if needed.”
 
-## Functional Requirements
+## User Flow
+1. Authenticated user navigates to `/calendar` (protected route).
+2. Calendar loads current month by default (Singapore timezone) with navigation controls for previous/next/today.
+3. Each day cell displays due todos count and holiday labels where applicable.
+4. Clicking a day opens a modal listing todos for that date with quick actions (view/edit).
+5. URL query `?month=YYYY-MM` updates as user navigates, allowing shareable links.
 
-### Calendar Structure
-- Default view loads current month (Singapore time). Use `getSingaporeNow()` to determine today.
-- Display month/year header with navigation controls:
-  - `Prev` button: moves to previous month.
-  - `Next` button: moves to next month.
-  - `Today` button: returns to current month.
-- Show day-of-week headers (`Sun`–`Sat`), matching Singapore calendar conventions (weeks start on Sunday).
-- Render calendar grid with leading/trailing days to fill complete weeks (typically 5–6 rows).
-- Highlight current day with distinct styling.
+## Technical Requirements
+- **Database**
+  - `holidays` table with fields: `id`, `date` (ISO string), `name`, `created_at`, `updated_at`.
+  - Ensure data seeded via `scripts/seed-holidays.ts` using Singapore public holidays.
+- **API Routes**
+  - `GET /api/holidays`
+    - Returns holidays for authenticated user (shared dataset but still require auth).
+  - `GET /api/todos?month=YYYY-MM` optional optimization to fetch monthly subset; otherwise fetch all and filter client-side (trade-off: for large datasets, consider month parameter).
+- **Calendar Component** (`app/calendar/page.tsx`)
+  - Client component managing state: current month `DateTime` (luxon) in Singapore timezone.
+  - Generate week rows using startOf('month').startOf('week') pattern (Sunday–Saturday) or Monday start depending on design.
+  - Highlight today with special styling.
+  - Distinguish weekends (Saturday/Sunday) with muted colors.
+  - Display holiday badge with holiday name (truncate if long; tooltip for full name).
+  - Each day cell shows todo count; clicking opens detail modal.
+- **Detail Modal**
+  - Lists todos due that day with priority badges and quick links to open in main page (`/` with query?).
+  - Optionally allow marking complete via fetch call.
+- **Timezone**
+  - Use `DateTime` in `Asia/Singapore` for all calculations; day boundaries rely on local midnight.
 
-### Holiday Integration
-- Fetch holidays for displayed month via `/api/holidays?month=YYYY-MM` or fetch all and filter client-side (optimize as needed).
-- Holidays should show name (tooltip or inline label) and special styling (e.g., colored dot/badge).
-- Public holidays must be specific to Singapore (seed data ensures this). Ensure duplicates are not shown when navigating months.
+## UI & UX Guidelines
+- Navigation controls: `◀ Previous`, `Today`, `Next ▶`.
+- Month title displayed as `November 2025` (Singapore locale).
+- Day cells responsive with CSS grid (7 columns, up to 6 rows).
+- Use Tailwind for styling dark theme consistent with main dashboard.
+- Provide legend for holidays and weekend color coding.
 
-### Todo Visualization
-- Query todos once for active month (e.g., `/api/todos?from=YYYY-MM-01&to=YYYY-MM-<last day>`). Apply Singapore timezone conversions server-side.
-- Each day cell shows todos due on that date; support multiple todos with count badge or stacked preview (design choice based on space).
-- Overdue todos for past dates still visible when viewing previous months.
-- Completed todos may appear grayed-out or under separate indicator—align with project design guidelines.
-- Clicking day cell opens modal/drawer listing todos for that date with key metadata (title, priority badge, tags, reminder, completion status toggle).
+## Edge Cases & Constraints
+- Handle months starting mid-week; show blank cells (muted) for previous/next month days.
+- Large number of todos on a day: show count badge; clicking reveals scrollable list.
+- If user has no todos, calendar still displays holidays.
+- Ensure accessibility: each day cell should be focusable; modal accessible (aria attributes).
+- Keep URL query synced without causing full page reload (use `useRouter().replace`).
 
-### UI/UX Details
-- Calendar page should match existing layout components (`app/calendar/page.tsx` using `'use client'`).
-- Responsive design: On mobile, consider vertical scroll for calendar grid and modals for day detail.
-- Provide empty-state messaging when no todos exist for month/day.
-- Maintain consistent Tailwind classes as used elsewhere for colors, typography, spacing.
-- Dark mode support: ensure background/foreground colors adapt.
+## Acceptance Criteria
+- Calendar loads with current month and shows todos on their due dates.
+- Navigation buttons update view and URL query parameter.
+- Public holidays display with correct names and dates.
+- Clicking a day opens modal listing todos due that day.
+- Weekend and today styling distinct and accessible.
 
-### Interactivity & State
-- Use React state to track `currentMonth` (e.g., `Date` object via Singapore helpers, or string `YYYY-MM`).
-- On month change, refetch todos/holidays for new range.
-- Memoize computed calendar matrix (array of weeks/days) for performance.
-- Day modals reuse existing todo components (if practical) or lightweight representations.
-- Optionally sync month navigation with URL query (`?month=YYYY-MM`) for shareable links (Next.js `useSearchParams`).
-
-## Data & API Requirements
-- Update or create API route for fetching todos by date range with authentication guard (if not already available). Respect session user ID and return due dates, completion status, priority, tags.
-- Ensure date filtering uses Singapore timezone to avoid off-by-one issues around midnight.
-- Holidays API returns `date`, `name` for requested range.
-- Frontend should normalize data via helper functions (e.g., convert to local display strings using `formatSingaporeDate`).
-
-## Performance Considerations
-- Limit API payload to todos within requested month; include buffer days for leading/trailing week cells if needed.
-- Reuse cached data when switching back to previously viewed months to reduce refetching (optional optimization).
-- Avoid multiple network calls for same data; batch fetch todos and tags together if possible.
-
-## Accessibility
-- Calendar grid should be keyboard navigable (arrow keys to move days, Enter to open day modal). Use appropriate ARIA roles (`aria-label` for days, `role="grid"`).
-- Holidays and todos should include descriptive text for screen readers (e.g., `aria-describedby` linking to list of todos).
-- Contrast requirements met for day states (today, selected, holiday, weekend).
-
-## Edge Cases
-- Months starting on Sunday vs. other weekdays—ensure grid alignment.
-- Leap years for February handling.
-- Days without todos or holidays should display placeholder value.
-- Handle months with daylight saving changes elsewhere gracefully (Singapore has no DST but ensure calculations don’t assume it).
-- If API fails, show error state with retry.
+## Testing Requirements
+- **Unit Tests**
+  - Calendar generation utility (given month, returns correct grid of days including leading/trailing days).
+  - Functions mapping todos to date buckets.
+- **Playwright E2E**
+  - Navigate to `/calendar`; ensure data loads and matches API.
+  - Step through previous/next/today controls; verify URL updates.
+  - Click a day with todos; confirm modal shows correct list.
+  - Validate holiday badge presence on known holiday (use seeded data).
 
 ## Out of Scope
-- Weekly or daily agenda views.
-- Drag-and-drop rescheduling within calendar.
-- External calendar integrations (ICS sync).
-- Server-side rendering for calendar data (stay client-side for now).
+- Drag-and-drop rescheduling within calendar (future enhancement).
+- Week or agenda views (only monthly grid).
+- Printing/exporting calendar view.
 
-## QA & Testing Guidance
-- Playwright tests: load calendar page, navigate prev/next, verify day count, open day modal, check todo metadata, highlight today, display holiday label.
-- Unit tests for calendar generation helper (input month → matrix of weeks/days) including edge months and leap year.
-- Test timezone correctness by creating todo near midnight Singapore time and verifying placement.
-- Manual verification across supported browsers and in both light/dark modes.
+## Success Metrics
+- Calendar renders within 200 ms on navigation.
+- Accurate holiday display validated against `holidays` table.
+- User feedback indicates improved visibility into due dates (survey rating ≥ 4/5).
+
+## Developer Notes
+- Prefer extracting calendar generation into `lib/calendar.ts` for reuse/testing.
+- Cache holidays client-side since dataset is static per year.
+- Document `/calendar` usage and navigation in `USER_GUIDE.md`.

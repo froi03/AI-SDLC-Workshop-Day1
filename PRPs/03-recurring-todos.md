@@ -1,103 +1,92 @@
-# Feature 03 – Recurring Todos (PRP)
+# PRP 03 · Recurring Todos
 
 ## Feature Overview
-- Introduce first-class recurring scheduling so todos can automatically regenerate after completion on daily, weekly, monthly, or yearly cadences.
-- Recurring metadata is visible everywhere the todo appears (forms, cards, calendar, exports) so users can distinguish repeating work from one-off tasks.
-- New instances inherit the source todo’s configuration (priority, tags, reminders, subtasks, templates) while shifting due dates forward using Singapore timezone rules.
+Recurring todos automatically regenerate after completion using predefined schedules (daily, weekly, monthly, yearly). The feature ensures continuity for routine tasks while maintaining metadata such as priority, reminders, tags, and subtasks.
 
 ## User Stories
-- “As someone managing routines, I want to mark a task as recurring so the system auto-creates the next occurrence when I finish it.”
-- “As a user reviewing my dashboard, I need a clear 🔄 badge that tells me which todos will return so I can plan capacity.”
-- “As a template author, I want recurring settings saved in templates so my weekly reports spawn with the right cadence out of the box.”
-- “As an exporter, I expect recurring metadata preserved so teammates understand which tasks repeat.”
+- **Operations Lead**: “I need a weekly review task that reappears once I finish it so I never forget.”
+- **Finance Manager**: “Monthly invoicing should recreate itself with the same settings every month.”
+- **Habit Tracker**: “Daily habits should return immediately once marked done to keep streaks going.”
 
 ## User Flow
-1. User opens the Create Todo form in `app/page.tsx`.
-2. User toggles the “Repeat this todo” checkbox, which reveals recurrence pattern and reminder selectors.
-3. User selects a pattern (daily/weekly/monthly/yearly) and sets a due date (required for recursion).
-4. When the user completes the todo (checkbox), the backend generates a new row with updated due date while the completed instance moves to the history section.
-5. The UI refreshes, showing the successor todo with the same priority, reminder, tags, and subtasks, plus a 🔄 badge indicating its pattern.
+1. User creates or edits a todo, enabling the “Repeat this todo” option.
+2. User selects a recurrence pattern (daily/weekly/monthly/yearly) and sets a due date.
+3. The todo displays a recurrence badge in lists.
+4. When the user marks the todo complete:
+   - Current instance moves to Completed section with `completedAt` timestamp.
+   - Backend creates the next occurrence with new `dueDate` based on pattern.
+   - UI refreshes to show the new active todo.
+5. User can disable recurrence at any time via edit form, stopping automatic regeneration.
 
 ## Technical Requirements
+- **Database**
+  - `todos` table fields already present: `is_recurring` (INTEGER 0/1) and `recurrence_pattern` (TEXT).
+  - Ensure `recurrence_pattern` has a `CHECK` constraint for allowed values.
+  - Store recurrence metadata on parent todo; no separate table required.
+- **Types**
+  - `type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';` exported from `lib/db.ts`.
+- **API**
+  - `POST /api/todos`: if `isRecurring` true, require valid `recurrencePattern` and `dueDate`.
+  - `PUT /api/todos/[id]`: when toggling `isRecurring`, enforce same validations; dropping `dueDate` must automatically nullify `isRecurring`, `recurrencePattern`, `reminderMinutes`.
+  - Completion handler (PUT with `isCompleted: true`)must trigger creation of new todo instance with inherited metadata.
+- **Next Instance Creation Logic**
+  - Use Singapore timezone functions (`getSingaporeNow`, `parseSingaporeDate`).
+  - Determine next due date by adding 1 day/week/month/year to the completed instance’s due date in Singapore zone.
+  - New todo copies: title, description, priority, reminder, tags (via tag relationship), subtasks templates? (subtasks may reset—optional; see Template feature for patterns).
+  - Set `isRecurring` and `recurrencePattern` on new instance.
+  - Reset `isCompleted=false`, `completedAt=null` in new instance.
+- **Timezone Handling**
+  - All calculations performed using `DateTime` in `Asia/Singapore` zone.
+  - Edge case for due dates near midnight should respect Singapore date boundaries.
 
-### Database Schema (`lib/db.ts`)
-- `todos` table already includes `is_recurring INTEGER` and `recurrence_pattern TEXT`; enforce acceptable values (`daily|weekly|monthly|yearly`) when creating or updating.
-- When cloning for the next occurrence, reuse existing `priority`, `tags` (via `todo_tags`), `subtasks`, `reminder_minutes`, and `description`.
-- Ensure timestamps use `getSingaporeNow()` so audit trails remain consistent.
+## UI Components & UX
+- **Create/Edit Form**
+  - Checkbox to enable recurrence.
+  - Dropdown for pattern (Daily, Weekly, Monthly, Yearly).
+  - Tooltips explaining each pattern and due date requirement.
+  - Reminder dropdown remains available; disable if no due date.
+- **Todo Card Badges**
+  - Display `Repeats <pattern>` badge (e.g., “Repeats weekly”).
+  - Use consistent styling with priority badges (bordered pill, blue/purple accent).
+- **Completion Behavior**
+  - When completed, show subtle toast (optional) indicating next instance created.
+  - Completed todo remains in history for auditing.
 
-### Backend Logic (`app/api/todos/[id]/route.ts`)
-- PUT handler must validate:
-  - `isRecurring` is boolean.
-  - When `isRecurring === true`, `dueDate` cannot be null and `recurrencePattern` must be one of the four enums.
-  - Unsetting `dueDate` automatically clears recurrence/reminder fields.
-- On completion (`isCompleted` flips to true) and `existing.isRecurring`, create the successor todo in the same transaction-like block:
-  - Calculate next due date according to pattern using Singapore timezone (e.g., `daily` +1 day, `weekly` +1 week, `monthly` +1 calendar month preserving day or clamping to valid end-of-month, `yearly` +1 year).
-  - Preserve reminder offset, priority, tags, and subtasks ordering.
-  - Reset completion status for the new record.
-- Return updated todo in response and ensure API never leaks null/undefined pattern values (use `null` explicitly).
-
-### Backend Logic (`app/api/todos/route.ts`)
-- POST handler must require a future due date when `isRecurring` checks true and reject invalid patterns with a 400 response.
-- Normalize reminder options via `REMINDER_OPTIONS` constant and block reminder assignment if no due date supplied.
-
-### Client Logic (`app/page.tsx`)
-- Maintain `createForm.isRecurring` and `createForm.recurrencePattern` state with default pattern `daily` when toggled on.
-- Show recurrence and reminder dropdowns only when relevant; disable reminder dropdown if no due date specified (mirroring current UX).
-- Display a 🔄 badge (`Repeats {pattern}`) for any todo with `isRecurring` true to reinforce recurrence.
-- During optimistic updates (create/edit/toggle), ensure cloned todos keep recurrence metadata so UI does not flicker.
-- When editing, ensure toggling off recurrence clears pattern/reminder fields and sets `isRecurring` false before sending payload.
-
-### Timezone Handling (`lib/timezone.ts`)
-- Use `getSingaporeNow()` and `DateTime` calculations with `'Asia/Singapore'` zone for all recurrence math—never rely on `new Date()`.
-- Provide helper utilities if necessary (e.g., `calculateNextDueDate(currentDueDate, pattern)`) to encapsulate timezone-safe increments and end-of-month handling.
-
-### Integration Points
-- **Templates**: `templates` table must store recurrence information so `POST /api/templates/[id]/use` recreates todos with the same pattern and `is_recurring` flag.
-- **Export/Import**: JSON and CSV exports include `is_recurring` and `recurrence_pattern`; import defaults to `isRecurring=false` if fields missing and validates enums if provided.
-- **Calendar View**: Recurring todos should appear on the correct due date after regeneration; ensure UI re-render picks up new due dates.
-- **Notifications**: Reminder scheduling should carry over to regenerated todos.
-
-## UI Components
-- **Create/Edit Forms**: Checkbox labelled “Repeat this todo”; when enabled, reveal pattern select (`DAILY`, `WEEKLY`, `MONTHLY`, `YEARLY`) and reminder dropdown. Disable reminder select when no due date is chosen.
-- **Todo Cards**: Add `Repeats {pattern}` badge next to priority badge using Tailwind utility classes from existing implementation (`border-blue-500/40`, `text-blue-300`).
-- **Completed Section**: Completed recurring todos retain badges to convey recurrence history.
-- **Template Modal**: Show recurrence badge and pattern in template previews so users can differentiate repeating templates at a glance.
-
-## Edge Cases
-- Disallow recurring todos without due dates or with due dates in the past (server-side validation returning HTTP 400).
-- When toggling `isRecurring` from true to false, ensure backend clears `recurrence_pattern`, `reminder_minutes`, and does not spawn successors.
-- Monthly/yearly increments must respect Singapore calendar specifics (e.g., Jan 31 + 1 month → Feb 29/28 depending on leap year, using Luxon’s `plus` with `zone` set).
-- Prevent duplicate successor creation if PUT request retried—guard by checking completion timestamps or idempotent logic.
-- If reminder offset pushes successor reminder into the past, allow creation but reminder system should still evaluate relative to new due date.
+## Edge Cases & Constraints
+- Must have due date for recurring todos. Reject creation otherwise.
+- Ensure recurrence pattern cannot be set without `isRecurring=true`.
+- For monthly/yearly recurrences, handle short months (use Luxon’s `.plus({ months: 1 })` which adjusts automatically).
+- Prevent infinite loops: creation of new instance happens once per completion; guard against repeated toggles by verifying todo is currently incomplete before generating.
+- If user unchecks recurrence on an existing recurring todo, do not auto-create future instances.
+- When updating due date of a recurring todo, future next instance should base on the updated due date.
 
 ## Acceptance Criteria
-- Users cannot enable recurrence without supplying a valid future due date and pattern; API enforces this with descriptive errors.
-- Completing a recurring todo generates exactly one successor with adjusted due date, preserving priority, tags, reminder, description, and subtasks.
-- Recurring badge accurately reflects pattern on all UI surfaces (main list, modals, templates, exports, calendar).
-- Import/export round-trips retain recurrence metadata without validation errors.
-- Templates created from recurring todos reproduce recurrence settings when used to generate new todos.
+- Users can enable recurrence with four patterns and a due date.
+- Completing a recurring todo immediately creates the next instance with inherited metadata.
+- Next due date follows correct cadence in Singapore timezone (no off-by-one errors).
+- Recurrence can be disabled without residual scheduled instances.
+- API rejects invalid recurrence configurations with descriptive errors.
 
 ## Testing Requirements
-- **Playwright**:
-  - Create todos for each pattern and verify badge rendering plus regeneration upon completion.
-  - Validate that attempting to enable recurrence without due date triggers visible client/server error messaging.
-  - Confirm reminders persist on regenerated instances.
-  - Ensure calendar view shows successor on expected date after completion (if calendar feature active).
-- **API Tests** (if implemented):
-  - POST rejects `isRecurring: true` when `dueDate` missing or past.
-  - PUT completion spawns successor with correct due date increments and inherited fields.
-  - PUT with `isRecurring: false` clears recurrence metadata.
-- **Unit Tests** (timezone helpers):
-  - `calculateNextDueDate` handles month-end transitions and leap years in Singapore zone.
+- **Unit Tests**
+  - Recurrence calculation utility: verify next due dates for each pattern, including edge dates (end of month, leap years).
+  - API validation for missing due date or invalid patterns.
+- **Playwright E2E**
+  - Create recurring todo for each pattern; mark complete; confirm new todo appears with correct due date and metadata.
+  - Disable recurrence and ensure no further instances generate.
+  - Verify UI badge and sorting after generation.
 
 ## Out of Scope
-- Custom recurrence intervals (e.g., every 2 weeks) or weekday-specific schedules.
-- Pausing or skipping single occurrences without completion.
-- Bulk actions to toggle recurrence across multiple todos simultaneously.
-- Automatic reminder recalculation beyond copying existing offsets.
+- Custom recurrence patterns (every X days, weekdays only).
+- Automatic creation at due date if not completed (strictly completion-triggered).
+- Recurrence templates for subtasks beyond copying existing ones (extended via templates feature).
 
 ## Success Metrics
-- 100% of recurring completions create the next occurrence without duplicate rows.
-- No validation regressions in Playwright suite covering recurring edge cases.
-- Export/import smoke tests confirm recurrence metadata fidelity.
-- User-facing bug reports related to recurrence drop after release, indicating predictable behavior.
+- 0 recurrence creation failures in backend logs during completion events.
+- 100% of recurrence due dates validated against Singapore timezone in integration tests.
+- User feedback indicates reduced manual re-entry for routine tasks.
+
+## Developer Notes
+- Keep recurrence logic in a dedicated helper (e.g., `lib/recurrence.ts`) for testability.
+- Ensure new instance creation occurs within a transaction if additional associated records (tags, subtasks) are inserted to prevent partial state.
+- Document recurrence behavior in `USER_GUIDE.md` to align with user expectations.

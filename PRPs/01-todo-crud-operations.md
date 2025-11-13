@@ -1,216 +1,178 @@
-# Feature 01 – Todo CRUD Operations
+# PRP 01 · Todo CRUD Operations
 
 ## Feature Overview
-- Establish the foundational ability for authenticated users to create, read, update, and delete todos.
-- Persist todos in SQLite (via `better-sqlite3`) while enforcing Singapore timezone business rules.
-- Provide a responsive client experience with optimistic updates, clear status grouping (Overdue, Active, Completed), and validation feedback.
-- Act as the baseline data model that later features (priority, recurrence, reminders, subtasks, tags, templates, search, export, calendar) extend.
+Foundational CRUD functionality lets authenticated users create, view, update, and delete todos while enforcing project-wide rules around Singapore timezone dates, validation, optimistic UI, and secure data access. Todos are the core parent entity for advanced features (priority, recurrence, subtasks, tags, templates, notifications); correctness and consistency here underpin the rest of the system.
 
 ## User Stories
-1. **Busy Professional** – As an authenticated user, I want to quickly add a todo with just a title so I can capture tasks without friction.
-2. **Detail-Oriented Planner** – As a user planning my week, I want to set due dates (in Singapore time) and optional metadata so tasks stay organized and future-ready.
-3. **Status Monitor** – As a user triaging my work, I want todos to be grouped by status (overdue, active, completed) so I instantly know what needs attention.
+- **Busy Professional**: “As a productivity-minded user, I need to add todos quickly so I can capture tasks before I forget them.”
+- **Planner**: “As someone who schedules my work, I want to set due dates and reminders so upcoming tasks stay visible.”
+- **Returning User**: “As a returning user, I want my todo list to load instantly and reflect the latest status without manual refreshes.”
 
 ## User Flow
-### Create Todo
-1. User clicks "Add Todo" (floating button on mobile, inline form on desktop).
-2. Modal or drawer opens with fields: title (required), description, due date/time (optional), priority (defaults to medium), recurrence toggle, reminder dropdown, tag picker (disabled until other features ship).
-3. User submits form. Client validates title and due date before sending to API.
-4. UI performs optimistic insert into Active list; API persists and returns canonical todo.
-5. UI reconciles response (ID, timestamps) or rolls back optimistic entry on error.
-
-### Read Todos
-1. On page load, client requests `GET /api/todos` after session validation.
-2. Response returns todos with related aggregates (subtask counts, tag IDs) for rendering.
-3. Client sorts todos by status sections: Overdue (due date < now, not completed), Active (due >= now or no due date, not completed), Completed (completed_at set).
-4. Within Overdue/Active, sort by priority and due date ascending; Completed sorted by most recently completed.
-
-### Update Todo
-1. User selects "Edit" on an existing todo (inline icon or context menu).
-2. Edit modal pre-populates fields; mutations happen locally via controlled inputs.
-3. Submitting calls `PUT /api/todos/[id]` with changed attributes.
-4. UI applies optimistic patch; on failure, revert and display error toast.
-
-### Toggle Completion
-1. User clicks completion checkbox.
-2. Client immediately toggles UI state and sends `PUT /api/todos/[id]` with `completed_at` set to Singapore current time (or cleared) plus metadata for recurring feature handshake.
-3. Response returns updated todo plus next occurrence when applicable.
-
-### Delete Todo
-1. User clicks delete icon → confirmation dialog summarizing cascaded data removal (subtasks, tag links, reminders).
-2. Confirm triggers `DELETE /api/todos/[id]`.
-3. UI removes todo optimistically; failure reinstates with error notification.
+1. User signs in (or is already authenticated) and lands on `/`.
+2. User enters a title in the “Create Todo” form; optional metadata includes description, due date, priority, recurrence, reminder.
+3. On submit, client sends `POST /api/todos`; UI optimistically appends item pending server confirmation.
+4. Todos render in grouped sections (Overdue, Active, Completed) sorted by priority then due date.
+5. User can:
+   - Toggle completion using checkbox (invokes `PUT /api/todos/[id]`).
+   - Edit metadata via modal/drawer (same endpoint).
+   - Delete todo with confirmation (calls `DELETE /api/todos/[id]`).
+6. Subtasks, tags, recurrence, reminders react to base todo updates; completed todos slide into Completed section automatically.
 
 ## Technical Requirements
-### Database Schema (`todos` table)
-Use `lib/db.ts` as the single source of truth. Fields (all `NOT NULL` unless noted):
-- `id` INTEGER PRIMARY KEY AUTOINCREMENT
-- `user_id` INTEGER (FK → `users.id`, cascade on delete)
-- `title` TEXT (trimmed, 1–200 chars)
-- `description` TEXT DEFAULT ''
-- `due_date` TEXT nullable (ISO string in Singapore TZ)
-- `is_completed` INTEGER DEFAULT 0
-- `completed_at` TEXT nullable (ISO string Singapore TZ)
-- `priority` TEXT DEFAULT 'medium' (enum introduced in Feature 02 but column created here)
-- `recurrence_pattern` TEXT nullable (enum from Feature 03; allow null initially)
-- `reminder_minutes` INTEGER nullable (added early for forward compatibility)
-- `created_at` TEXT DEFAULT current Singapore timestamp
-- `updated_at` TEXT DEFAULT current Singapore timestamp
-- Indexes: `(user_id)`, `(user_id, due_date)`, `(user_id, is_completed)`
+### Database Schema (`lib/db.ts`)
+- Table `todos` columns:
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT
+  - `user_id` INTEGER NOT NULL REFERENCES `users(id)` ON DELETE CASCADE
+  - `title` TEXT NOT NULL (trimmed, 1–200 chars)
+  - `description` TEXT DEFAULT '' (trimmed, 0–2000 chars)
+  - `priority` TEXT NOT NULL DEFAULT 'medium' CHECK IN ('high','medium','low')
+  - `due_date` TEXT NULL (ISO string in Singapore timezone)
+  - `is_completed` INTEGER NOT NULL DEFAULT 0
+  - `completed_at` TEXT NULL
+  - `is_recurring` INTEGER NOT NULL DEFAULT 0
+  - `recurrence_pattern` TEXT NULL CHECK pattern validity
+  - `reminder_minutes` INTEGER NULL (allowed values: 15,30,60,120,1440,2880,10080)
+  - `created_at` TEXT NOT NULL
+  - `updated_at` TEXT NOT NULL
+- Ensure `PRAGMA foreign_keys = ON`.
+- Add indexes: `CREATE INDEX IF NOT EXISTS idx_todos_user_id ON todos(user_id);`, `idx_todos_due_date`, `idx_todos_completed`.
+- Migration style: wrap `ALTER TABLE` in try/catch to avoid errors on re-run.
 
-### Data Access Layer (`lib/db.ts`)
-- Initialize `better-sqlite3` with database file `todos.db` in project root (or Railway volume when deployed).
-- Provide synchronous CRUD helpers (`todoDB`) exposing:
-  - `listByUser(userId: number): Todo[]`
-  - `findById(id: number, userId: number): Todo | undefined`
-  - `create(userId: number, input: CreateTodoInput): Todo`
-  - `update(id: number, userId: number, patch: UpdateTodoInput): Todo`
-  - `delete(id: number, userId: number): void`
-- Ensure all SQL uses prepared statements with named parameters.
-- Maintain referential integrity with `ON DELETE CASCADE` for subtasks (`Feature 05`) and tag pivots (`Feature 06`).
+### Type Definitions
+- Export in `lib/db.ts`:
+  ```ts
+  export type Priority = 'high' | 'medium' | 'low';
+  export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
+  export interface Todo {
+    id: number;
+    userId: number;
+    title: string;
+    description: string;
+    priority: Priority;
+    dueDate: string | null;
+    isCompleted: boolean;
+    completedAt: string | null;
+    isRecurring: boolean;
+    recurrencePattern: RecurrencePattern | null;
+    reminderMinutes: number | null;
+    createdAt: string;
+    updatedAt: string;
+  }
+  ```
+- Provide query helpers typed accordingly.
 
-### Shared Types (`lib/db.ts` & `lib/types.ts` if split)
-```ts
-export type Priority = 'high' | 'medium' | 'low';
-export interface Todo {
-  id: number;
-  userId: number;
-  title: string;
-  description: string;
-  dueDate: string | null; // ISO string (Asia/Singapore)
-  isCompleted: boolean;
-  completedAt: string | null;
-  priority: Priority;
-  recurrencePattern: RecurrencePattern | null; // forward compat
-  reminderMinutes: number | null;
-  createdAt: string;
-  updatedAt: string;
-}
+### Database Operations (sync `better-sqlite3`)
+- `todoDB.create({ userId, title, description, priority, dueDate, isRecurring, recurrencePattern, reminderMinutes }): Todo`
+- `todoDB.listByUser(userId: number): Todo[]` sorted by `is_completed`, `priority`, `due_date`.
+- `todoDB.getById(id: number, userId: number): Todo | undefined`
+- `todoDB.update(id, userId, partial: Partial<...>): Todo`
+- `todoDB.delete(id: number, userId: number): void`
+- `todoDB.toggleComplete(id: number, userId: number, isCompleted: boolean, completedAt: string | null): Todo`
+- Use prepared statements cached at module scope.
 
-export interface CreateTodoInput {
-  title: string;
-  description?: string;
-  dueDate?: string | null;
-  priority?: Priority;
-  recurrencePattern?: RecurrencePattern | null;
-  reminderMinutes?: number | null;
-}
-
-export interface UpdateTodoInput extends Partial<CreateTodoInput> {
-  isCompleted?: boolean;
-  completedAt?: string | null;
-}
-```
-(Define `RecurrencePattern` in Feature 03; here it may be `type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly'` but unused.)
-
-### API Contracts (Next.js App Router)
-All routes live under `app/api/todos/` and start by calling `getSession()` from `lib/auth.ts`.
-
-`POST /api/todos`
-- Request body: `{ title: string; description?: string; dueDate?: string | null; priority?: Priority; recurrencePattern?: RecurrencePattern | null; reminderMinutes?: number | null; }
-- Validation:
-  - `title`: trimmed, 1–200 chars
-  - `dueDate`: optional, when provided must parse via `parseSingaporeInput()` and be ≥ `getSingaporeNow().add(1 minute)`
-  - `reminderMinutes` requires `dueDate`
-- Response 201: `{ todo: Todo }`
-- Errors: 400 (validation), 401 (unauthenticated), 500 (unexpected)
-
-`GET /api/todos`
-- Query returns all todos for session user including aggregated metadata:
-  - `subtaskStats`: `{ total: number; completed: number }`
-  - `tagIds`: `number[]`
-- Response 200: `{ todos: TodoWithRelations[] }`
-
-`GET /api/todos/[id]`
-- Params via `const { id } = await params;`
-- Response 200: `{ todo: TodoWithRelations }`
-- Errors: 404 when not found or owner mismatch
-
-`PUT /api/todos/[id]`
-- Accept same body as create (partial) plus `isCompleted`.
-- Server sets `updated_at = now` and, when `isCompleted` transitions true→false, sets/clears `completed_at` using Singapore clock.
-- Response 200: `{ todo: TodoWithRelations }`
-
-`DELETE /api/todos/[id]`
-- Response 204 on success
-- Cascade removes subtasks and todo-tag pivots automatically in DB
+### API Routes (Next.js 16 App Router)
+- `POST /api/todos`
+  - Body: `{ title, description?, priority?, dueDate?, isRecurring?, recurrencePattern?, reminderMinutes? }`.
+  - Validate session via `await getSession()`; respond 401 if absent.
+  - Enforce user ownership; `session.userId` stored on todo.
+  - Use `getSingaporeNow()` for timestamps; convert dueDate input via `parseSingaporeDate()` util if present.
+  - Return JSON `{ todo }`.
+- `GET /api/todos`
+  - Returns `{ todos }` for authenticated user.
+- `GET /api/todos/[id]`
+  - Validate `const { id } = await params`.
+  - Return 404 if missing or not owned.
+- `PUT /api/todos/[id]`
+  - Accept partial updates; re-run validation on provided fields.
+  - Handle completion toggles and recurrence creation logic (if `isRecurring` and `isCompleted` flips true, delegate to recurrence helper to spawn next instance).
+- `DELETE /api/todos/[id]`
+  - Cascade deletes subtasks, tags associations via foreign keys.
+- Responses include `NextResponse.json()` with status codes and error messages consistent across routes.
 
 ### Validation Rules
-- Trim string inputs; reject empty title.
-- Enforce max lengths: title ≤ 200, description ≤ 2000.
-- Disallow due dates in the past (< current Singapore time + 1 minute).
-- When removing `dueDate`, also null out `reminderMinutes` and `recurrencePattern`.
-- Ensure authenticated user owns todo before mutations.
+- Titles trimmed; reject empty or >200 chars with 400 error.
+- Description optional, trimmed, ≤2000 chars.
+- Due date optional; if provided, parse using Singapore timezone and ensure `dueDate > getSingaporeNow().plus({ minutes: 1 })`.
+- `priority` must be one of allowed values; default `medium`.
+- If `isRecurring` true, ensure `recurrencePattern` set and due date provided.
+- `reminderMinutes` allowed only from enumerated set and only when due date exists.
+- All numeric IDs parsed as integers; reject NaN.
 
 ### Timezone Handling
-- Replace all `new Date()` usages with `getSingaporeNow()` and helpers from `lib/timezone.ts`.
-- Store timestamps as ISO strings already converted to Singapore timezone (prefer `formatISO(setZonedTime(...))`).
-- For comparisons, convert stored `due_date` into Luxon/Temporal objects via timezone helper utilities.
+- Never use `new Date()` directly for calculations; rely on `getSingaporeNow()` and helper functions in `lib/timezone.ts`.
+- Store ISO strings (UTC) but derive using Singapore zone to avoid daylight savings issues (not present but for consistency).
+- Sorting/grouping on server should treat due dates as Singapore local before comparisons.
 
-## UI Components
-- `app/page.tsx` (client component) houses form state, fetch logic, and rendering.
-- Controlled form components using React hooks; integrate Tailwind CSS 4 for layout.
-- Sections:
-  - Overdue: red header, includes todos with due date < now and not completed.
-  - Active: default list for due ≥ now or no due date.
-  - Completed: collapsible section showing completed items with timestamp.
-- Components/patterns:
-  - `TodoFormModal`: create/edit modal with accessible labels and keyboard support.
-  - `TodoList`: renders sections with virtualization-ready structure for future scaling.
-  - `TodoItem`: handles checkbox, metadata chips, action buttons.
-  - `ConfirmationDialog`: reusable for delete confirmation.
-- Use optimistic UI patterns: update local state immediately, track pending state via `isSaving` flags, show inline spinners.
-- Display validation errors inline (below title, due date fields) and toast-level errors for server failures.
+## UI Components & UX (app/page.tsx)
+- **Create Todo Form**
+  - Text input for title (auto-focus).
+  - Optional fields (toggleable panel) for description, priority dropdown, due date picker (Singapore timezone aware), recurrence controls, reminder dropdown.
+  - Disable submit when pending or invalid; show inline validation messages.
+- **Todo List Sections**
+  - Group by Overdue (dueDate < now and not completed), Active (incomplete), Completed (completed true) with counts.
+  - Each item displays priority badge, title, description preview, due date (formatted via `formatSingaporeDate`), recurrence icon, reminder icon, subtasks progress.
+- **Actions**
+  - Checkbox to toggle completion; optimistic update with rollback on failure.
+  - “Edit” opens modal with full form; patch changes via `PUT`.
+  - “Delete” opens confirmation; on success remove from state.
+  - Show skeleton loader while fetching initial data.
+- **Optimistic UI**
+  - Add placeholder todo when creating; if server fails, remove and show toast.
+  - Use `mutate`/`setTodos` pattern to avoid flicker.
+- **Accessibility**
+  - Form controls labelled; keyboard focus maintained.
+  - Sections have headings for screen readers; Completed collapsible to reduce clutter.
 
-## Edge Cases
-- User submits title with excessive whitespace → trim and validate.
-- Due date equals current minute → reject; must be at least +1 minute.
-- Client offline during optimistic update → detect fetch error, rollback state, surface “Failed to sync” banner.
-- Deleting a todo currently shown in edit modal → modal closes gracefully.
-- Large todo lists: ensure sorting stable and performant; consider memoized selectors.
-- Session expiration between optimistic update and server response → rollback and redirect to login.
-- Cross-feature readiness: allow storing metadata fields even before dependent features are fully implemented (no-op on UI until features 02–06 ship).
+## Edge Cases & Constraints
+- Guard against duplicate submissions when user double-clicks create button (disable, dedupe by trimmed title optional).
+- When due date removed from recurring todo, also disable recurrence/reminder server-side.
+- Completed todos should store `completedAt` timestamp via Singapore now.
+- Sorting rules: Overdue sorted soonest first; Active sorted by priority (high→low) then due date; Completed sorted by `completed_at` desc.
+- If todo has recurring flag and user marks incomplete again, cancel in-progress next-instance creation (no duplicate).
+- API must return 404 when user tries to access todo belonging to another user.
+- Validate JSON body size to avoid huge payloads (reject >10KB with 413 optional).
 
 ## Acceptance Criteria
-- Users can create a todo with only a title; todo appears in Active section immediately.
-- Validation prevents empty titles and due dates in the past (Singapore time).
-- Todos sort by status (Overdue → Active → Completed) and within sections by priority & due date.
-- Toggling completion moves todo to Completed section (with timestamp) or back to Active/Overdue.
-- Deleting a todo removes associated subtasks and tag links (cascade) without orphan records.
-- API responses respect authenticated user boundaries; accessing others' todos returns 404.
-- UI performs optimistic updates and recovers gracefully on errors.
+- Users can create todos with just a title; defaults apply correctly.
+- Todos load with correct grouping and ordering for the signed-in user.
+- Editing updates metadata and reflects immediately without page reload.
+- Completion toggles persist and move todo to correct section.
+- Deleting a todo removes it and its child entities (subtasks, tags associations).
+- All API routes enforce authentication and ownership checks.
+- Due date and reminder validation respects Singapore timezone requirements.
+- Client shows helpful error states and resets optimistic mutations on failure.
 
 ## Testing Requirements
-### Playwright E2E (tests/01-todo-crud.spec.ts)
-- Create todo with title only (assert visible in Active section).
-- Create todo with title + description + due date + metadata (where features available) and verify due date formatting.
-- Edit todo title and due date; ensure sections update (Active ↔ Overdue).
-- Toggle todo completion on/off; assert Completed section counts update.
-- Delete todo; confirm removal and absence on page reload.
-- Attempt to create todo with past due date; assert validation error message.
-- Check optimistic UI: simulate slow network (Playwright route fulfill delay) and ensure spinner + final state matches server.
-
-### Unit Tests (Vitest / Jest)
-- `lib/timezone.ts`: ensure `isFutureSingaporeDatetime` helper validates due dates.
-- `lib/db.ts`: CRUD operations respect per-user isolation and cascade deletes.
-- `app/api/todos` route handlers: validate input, unauthorized access, error handling.
-- Utility sort function: ensures deterministic ordering across priority and due date.
-
-### Manual QA
-- Mobile viewport form usability (focus order, keyboard dismissal).
-- Accessibility: focus trap within modal, keyboard navigation, ARIA labels on actions.
-- Error states: simulate backend failure, confirm rollback and toast.
+- **Unit Tests**
+  - Database CRUD operations (create/read/update/delete) ensure fields stored, updated timestamps, cascade on delete.
+  - Validation utilities for titles, due dates, reminders.
+  - Sorting helper producing expected grouping given sample dataset.
+- **Playwright E2E**
+  - Create todo with minimal data; ensure appears in Active section.
+  - Create todo with full metadata (priority, due date, recurrence, reminder) and verify UI badges.
+  - Edit existing todo; assert updated fields shown.
+  - Toggle completion moves todo to Completed section and persists after reload.
+  - Delete todo removes from UI and ensures subtasks/tags cleaned up (assert via UI absence).
+  - Due date validation prevents past date (assert error message).
+- **API Integration Tests (optional)**
+  - Hitting endpoints with invalid payloads returns appropriate 4xx errors.
+  - Unauthorized requests return 401.
 
 ## Out of Scope
-- Bulk todo creation/import (covered in Feature 09).
-- Calendar visualization (Feature 10).
-- Detailed analytics or reporting.
-- Offline-first caching beyond optimistic updates.
-- Sharing todos between users.
+- Bulk create/edit/delete operations.
+- Cross-user sharing or delegation of todos.
+- Offline persistence beyond optimistic updates (no local storage sync).
+- Kanban or calendar views (covered in other features).
 
 ## Success Metrics
-- Todo creation to visible rendering < 300 ms (after API response) under normal latency.
-- 0 validation regressions reported in Playwright suite (all assertions pass for 3 consecutive runs).
-- Support at least 500 todos per user with sorting/filtering under 100 ms on client.
-- Post-release bug rate < 2 issues/week related to CRUD functionality.
-- User satisfaction: qualitative feedback indicates todo input feels “instant” and reliable.
+- All Todo CRUD Playwright tests pass in CI (3 consecutive runs).
+- Average API response time for CRUD endpoints < 250 ms on local dev dataset.
+- No known data consistency bugs post-release (zero open issues labelled `todo-crud`).
+- User feedback indicates ability to create/edit/delete todos without blockers.
+
+## Developer Notes
+- Follow `.github/copilot-instructions.md` for architecture patterns, especially synchronous DB usage and Singapore timezone utilities.
+- Keep `app/page.tsx` monolithic state manageable with existing hooks; avoid introducing new global state libraries.
+- Coordinate with Feature 02+ PRPs to ensure priority, recurrence, tags integration remains consistent (e.g., avoid resetting fields unexpectedly).
+- Document any new helper utilities in `USER_GUIDE.md` if user-visible behavior changes.

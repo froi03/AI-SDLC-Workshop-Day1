@@ -1,88 +1,84 @@
-# Feature 02 – Priority System (PRP)
+# PRP 02 · Priority System
 
 ## Feature Overview
-- Introduce first-class priority metadata (`high`, `medium`, `low`) for every todo so urgency is communicated everywhere (forms, cards, filters, exports).
-- Priorities drive default ordering (high → medium → low) while still respecting due dates and creation timestamps as secondary sort keys.
-- Visual styling (badges, color coding) follows Tailwind CSS 4 conventions from `app/page.tsx` and accommodates light/dark mode as described in `USER_GUIDE.md`.
-- Priority values move through the full stack: database (`better-sqlite3`), API routes, client state, recurring/task templates, and export/import pipelines.
+Priority levels help users identify which todos require immediate attention. The system introduces three priority bands (high, medium, low) with visual badges, sorting rules, and filtering options that affect both UI presentation and API validation.
 
 ## User Stories
-- “As a busy professional, I want to mark urgent tasks as **High priority** so they appear at the top of my list.”
-- “As someone scanning a long backlog, I need color-coded priority badges so I can distinguish importance at a glance.”
-- “As a planner, I want to filter todos by priority so I can focus on high-impact work first.”
-- “As a collaborator sharing data via export, I need the priority field preserved so recipients understand task urgency.”
+- **Busy Professional**: “I want critical tasks to stand out so I don’t miss deadlines.”
+- **Planner**: “I need to filter todos by importance to focus on a single priority at a time.”
+- **Team Lead**: “I expect color cues to quickly understand what deserves escalation.”
 
 ## User Flow
-1. User opens the todo form in `app/page.tsx`; the priority selector defaults to **Medium** and offers **High** and **Low** options.
-2. Upon creation, the todo card renders with a color-coded badge (red/yellow/blue) and is inserted in the correct position according to priority then due date.
-3. Users adjust priority via the edit modal; the change immediately impacts badge color, ordering, and any open filters.
-4. Filters section includes an “All Priorities” dropdown. Selecting a value narrows all sections (Overdue, Pending, Completed) while maintaining counts as explained in `USER_GUIDE.md`.
-5. When a todo becomes recurring, exported, duplicated from a template, or imported, the priority value is carried over so UX remains consistent across features.
+1. User opens the Create Todo form and selects a priority (default: medium).
+2. UI displays the priority badge immediately for the new todo.
+3. Todos in the Active and Overdue lists sort by priority rank (high → medium → low), then by due date, then by creation order.
+4. User edits an existing todo to change priority; the UI updates badges, sorting order, and filters.
+5. User applies a priority filter to view only todos with a specific priority level.
 
 ## Technical Requirements
+- **Database**
+  - Column `priority` already exists in `todos` table; ensure `CHECK` constraint: `priority IN ('high','medium','low')`.
+  - Default value `medium` for new records.
+  - Add index on `(user_id, priority)` if necessary for filtering (optional based on query performance).
+- **Types**
+  - `type Priority = 'high' | 'medium' | 'low';` exported from `lib/db.ts`.
+- **API Validation**
+  - `POST /api/todos` and `PUT /api/todos/[id]` must validate the provided priority against the allowed set.
+  - Requests without priority should fallback to `'medium'`.
+- **Sorting Logic**
+  - Server-side: `todoDB.listByUser` order by `is_completed`, then custom priority rank, then due date.
+  - Client-side: `groupTodos` maintains same rank order for reactive updates.
+- **Filtering API**
+  - No dedicated endpoint; UI filters client-side using fetched data.
+- **Timezone**
+  - Sorting remains aware of due dates in Singapore timezone (already handled by core feature).
 
-### Database Schema (`lib/db.ts`)
-- Add a `priority TEXT NOT NULL DEFAULT 'medium'` column to the `todos` table with a `CHECK` or validation guard limiting values to `high`, `medium`, or `low`.
-- Update shared types (`Priority`, `Todo`, DTOs) and CRUD helpers to accept and return priority.
-- Follow existing migration style: wrap `ALTER TABLE` in a `try/catch` during `db.exec()` to avoid runtime failures when column already exists.
+## UI Components & UX
+- Priority dropdown in Create/Edit forms with uppercase labels and descriptive tooltips (optional).
+- Badges on todo cards with Tailwind classes or inline styles reflecting project color palette:
+  - High: red `#ef4444`
+  - Medium: amber `#f59e0b`
+  - Low: blue `#3b82f6`
+- Badges should be accessible (text uppercase, minimum contrast 4.5:1).
+- Filters section (chips or dropdown) allowing selection of a single priority (All/High/Medium/Low).
+- Visual feedback when filter active: show pill with “Priority: HIGH” and clear button.
 
-### API Contracts
-- `POST /api/todos` and `PUT /api/todos/[id]` validate `priority`; coerce invalid values to `'medium'` or respond with `400` (pick one approach and stay consistent).
-- `GET` endpoints return priority in every todo payload so the client can render badges without extra lookups.
-- When cloning todos (recurring completion handler, template usage, import), copy the original priority.
-- Export endpoints include priority in both JSON and CSV (see formats in `USER_GUIDE.md`), and import logic defaults to `'medium'` when a legacy file omits the field.
-
-### Client Logic (`app/page.tsx`)
-- Extend form state (`useState`/`useReducer`) for create/edit flows to include `priority`. Default to `'medium'` and validate before calling the API.
-- Priority influences sorting: create an order map (`{ high: 0, medium: 1, low: 2 }`) used with due date (earliest first, `null` last) and creation time as tertiary key.
-- Filter context/state gains a `priorityFilter` value. Filtering should apply before section rendering so counts (Overdue/Pending/Completed) stay accurate.
-- Memoize sorting and filtering selectors (`useMemo`) to avoid unnecessary recomputations when unrelated state changes.
-
-### Styling & Accessibility
-- Use Tailwind utility classes matching the palette documented in the README (e.g., high: `bg-red-500`, medium: `bg-amber-500`, low: `bg-blue-500`). Provide dark-mode adjustments (e.g., `dark:bg-red-400`).
-- Add accessible labels (e.g., `aria-label="High priority"`) or visually hidden text for screen readers. Colors alone must not convey meaning.
-- Preserve consistent spacing with other badges (recurrence 🔄, reminders 🔔, tags) so layouts remain aligned on desktop and mobile.
-
-### Integrations with Other Features
-- **Recurring todos**: Ensure the PUT handler that spawns the next instance copies priority unchanged.
-- **Templates**: Store `priority` in template definitions so creating from template sets the correct value instantly.
-- **Export/Import**: Including priority is mandatory; apply defaults when missing.
-- **Search & Filtering (Feature 08)**: Confirm combined filters (search, tags, priority) use AND semantics, matching the behavior described in `USER_GUIDE.md`.
-
-## UI Components
-- **Todo Form**: Dropdown or segmented control with labels High/Medium/Low. Default selection visually emphasized. Disabled state mirrors other inputs.
-- **Todo Cards**: Badge precedes recurrence/reminder/tag badges. Colors (red/yellow/blue) adapt in dark mode, as explained in the guide.
-- **Filter Bar**: “All Priorities” dropdown near search and tag filters; selecting a value updates counts and sections in real-time.
-- **Completed Section**: Maintain priority badges so context is retained even after completion.
-- **Modal Dialogs**: Edit modal includes priority selector consistent with create form. Template manager preview displays stored priority badge.
-
-## Edge Cases
-- Requests with missing priority default to `'medium'` both server-side and client-side for backward compatibility.
-- Invalid values (e.g., `'urgent'`) must not reach the database; respond with `400` or coerce to default.
-- Sorting must place todos with no due date after those with a due date but still respect priority ordering.
-- Legacy export files without priority field should import with `'medium'` and succeed.
-- Ensure badge colors meet WCAG AA contrast in both themes; add textual fallback (e.g., `H`, `M`, `L`) if contrast cannot be achieved.
+## Edge Cases & Constraints
+- Reject invalid priority values with HTTP 400.
+- Ensure badge text remains visible in dark mode.
+- When editing priority, keep todo in same section but re-run sorting to reflect new order.
+- Filtering combined with other filters (tags/search) must use AND logic.
+- Avoid storing priority casing variations; server normalizes to lowercase strings.
 
 ## Acceptance Criteria
-- Creating, editing, and viewing todos shows the priority selector/badge with correct defaults and colors.
-- Todos appear sorted by priority, then due date, then creation timestamp, matching README expectations.
-- Priority filter narrows todo lists across all sections and surfaces “Clear All” when active.
-- Saved templates, recurring instances, exports, and imports retain priority values.
-- API responses and database rows match the updated schema and reject invalid priorities.
+- Users can assign priority during create and edit flows.
+- Todos display color-coded badges reflecting current priority.
+- Active/Overdue todos sort high→medium→low and then by due date.
+- Priority filter toggles results correctly without page reload.
+- API rejects invalid priority values with descriptive error messages.
 
 ## Testing Requirements
-- **Playwright**: Extend CRUD specs to cover creating todos with each priority, verifying badge colors in UI, confirming sorting order, and testing priority filters (alone and combined with tags/search).
-- **API Tests** (if present): Validate POST/PUT rejects invalid priority or defaults appropriately; ensure GET returns the field.
-- **Manual QA**: Check light/dark mode contrast, screen reader labels, responsive layout (desktop/tablet/mobile), and import/export round-trips with legacy files.
+- **Unit Tests**
+  - Priority validation helper (allowed vs. invalid values).
+  - Sorting function verifying expected order for sample dataset.
+- **Playwright E2E**
+  - Create todos with each priority; verify badges and ordering.
+  - Edit a todo to change priority; confirm badge update and reordering.
+  - Apply priority filter; ensure only matching todos appear.
+  - Combine priority filter with tag or search filter for AND logic.
+  - Visual regression (optional) to confirm contrast in light/dark mode.
 
 ## Out of Scope
-- User-defined priority levels or dynamic extensions.
-- Auto-priority adjustments based on due dates, reminders, or analytics.
-- Priority-specific notification rules beyond existing reminder system.
+- Custom priority levels beyond the three defaults.
+- Bulk priority updates.
+- Priority-specific notifications (covered by reminders feature).
 
 ## Success Metrics
-- 100% of new todos include a priority value on creation.
-- Sorting and filter logic produce zero regressions in existing E2E suites.
-- Export/import round-trip retains identical priority distribution.
-- Accessibility audits confirm badges meet contrast requirements and are announced by screen readers.
-```
+- 100% of newly created todos persist a valid priority.
+- Priority filter latency < 100 ms for 500 todos in client state.
+- Zero accessibility violations related to priority badges (axe scan).
+
+## Developer Notes
+- Reuse Tailwind utility classes or existing inline styles for badges to maintain consistent theming.
+- Keep priority enumerations synchronized across frontend and backend to avoid drift.
+- When updating types, ensure `app/page.tsx` imports remain correct (avoid circular dependencies).
