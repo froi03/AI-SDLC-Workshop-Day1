@@ -154,7 +154,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const result = db.transaction(() => {
+  const createTodo = db.transaction(() => {
     const created = todoDB.create({
       userId: session.userId,
       title: title as string,
@@ -172,7 +172,9 @@ export async function POST(request: NextRequest) {
     }
 
     return { todo: created };
-  })();
+  });
+
+  const result = createTodo();
 
   return NextResponse.json(result, { status: 201 });
 }

@@ -1,17 +1,22 @@
-import type { Metadata } from 'next';
+import type { Metadata, Route } from 'next';
 import Link from 'next/link';
 import './globals.css';
+import { getSession } from '@/lib/auth';
+import { LogoutButton } from '@/components/logout-button';
 
 export const metadata: Metadata = {
   title: 'Todo App',
   description: 'Singapore timezone aware todo manager'
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children
 }: {
   children: React.ReactNode;
 }) {
+  const session = await getSession();
+  const isAuthenticated = Boolean(session);
+
   return (
     <html lang="en">
       <body className="bg-slate-950 text-slate-100">
@@ -34,6 +39,16 @@ export default function RootLayout({
                 >
                   Calendar
                 </Link>
+                {isAuthenticated ? (
+                  <LogoutButton />
+                ) : (
+                  <Link
+                    href={'/login' as Route}
+                    className="rounded border border-transparent px-3 py-1 text-slate-300 transition hover:border-blue-500/60 hover:text-blue-200"
+                  >
+                    Login
+                  </Link>
+                )}
               </nav>
             </div>
           </header>
