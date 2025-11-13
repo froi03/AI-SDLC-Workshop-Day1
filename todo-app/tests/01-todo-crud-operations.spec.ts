@@ -122,16 +122,24 @@ test('toggles todo completion status', async ({ page }) => {
   ]);
 
   // Mark as complete
-  await page.getByLabel('Mark Toggle me as complete').click();
-  await page.waitForTimeout(500); // Wait for state update
+  await Promise.all([
+    page.waitForResponse((response) =>
+      response.url().includes('/api/todos/') && response.request().method() === 'PUT' && response.status() === 200
+    ),
+    page.getByLabel('Mark Toggle me as complete').click()
+  ]);
 
   // Verify in completed section
   const completedSection = page.getByTestId('todo-section-completed');
   await expect(completedSection.getByText('Toggle me')).toBeVisible();
 
   // Mark as incomplete
-  await page.getByLabel('Mark Toggle me as incomplete').click();
-  await page.waitForTimeout(500); // Wait for state update
+  await Promise.all([
+    page.waitForResponse((response) =>
+      response.url().includes('/api/todos/') && response.request().method() === 'PUT' && response.status() === 200
+    ),
+    page.getByLabel('Mark Toggle me as incomplete').click()
+  ]);
 
   // Verify back in active section
   const activeSection = page.getByTestId('todo-section-active');
@@ -161,6 +169,9 @@ test('deletes a todo', async ({ page }) => {
     ),
     deleteButton.click()
   ]);
+
+  // Wait for UI to update
+  await page.waitForTimeout(300);
 
   // Verify it's gone
   await expect(page.getByText('To be deleted')).toHaveCount(0);
@@ -231,6 +242,9 @@ test('persists todos after page reload', async ({ page }) => {
 
   // Reload the page
   await page.reload();
+  
+  // Wait for page to load completely
+  await page.waitForLoadState('networkidle');
 
   // Verify the todo still exists after reload
   await expect(page.getByText('Persistent todo')).toBeVisible();
