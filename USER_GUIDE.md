@@ -13,6 +13,40 @@
 10. [Search & Advanced Filtering](#10-search--advanced-filtering)
 11. [Export & Import](#11-export--import)
 12. [Calendar View](#12-calendar-view)
+
+---
+
+## 1. Authentication
+
+### Quick Overview
+- WebAuthn/passkey-only sign-in with 7-day sessions stored in an HTTP-only cookie.
+- `/` and `/calendar` are protected behind the login wall; unauthenticated visitors are redirected to `/login`.
+- Every account can register multiple authenticators (fingerprint, Face ID, security keys, etc.).
+
+### Registering A Passkey
+1. Click **Login** in the global header or navigate to `/login`.
+2. Switch to **Create your passkey**, enter your email and display name, then press **Register passkey**.
+3. Approve the browser’s WebAuthn prompt. Supported authenticators include Touch ID, Windows Hello, Android biometrics, and FIDO security keys.
+4. Successful registration signs you in immediately and redirects to your requested destination (defaults to the dashboard).
+
+### Signing In With A Passkey
+1. Open `/login` and stay on **Sign in with your passkey**.
+2. Enter the email you used during registration and click **Sign in**.
+3. Approve the WebAuthn prompt. Redirects honour the `?next=` query string so deep links survive the login flow.
+
+### Logging Out
+- Use the **Logout** button in the header to clear the session cookie and return to `/login`.
+- Sessions automatically expire after seven days or sooner if the cookie is removed.
+
+### Tips & Troubleshooting
+- WebAuthn requires a modern browser. If you see “Browser not supported”, upgrade to the latest Chrome, Edge, Firefox, or Safari.
+- Challenges are valid for ~5 minutes. If you wait too long, restart the flow to fetch a new challenge.
+- You can re-register additional authenticators by repeating the registration flow on new devices.
+- Error messages bubble up inline on the login page so you can retry immediately.
+
+---
+
+## 12. Calendar View
 ### What It Does
 - Presents todos in a Singapore-timezone monthly grid so you can spot busy days and public holidays.
 - Lets you drill into a single day, review details, and update completion without leaving the calendar.
@@ -517,115 +551,6 @@ Export your entire workspace to a versioned JSON file and restore it later. Each
 - Medium list (100-500 todos): 50-250KB
 - Large list (> 500 todos): > 250KB
 - No file size limit enforced
-
----
-
-## 12. Calendar View
-
-### What It Does
-Visualize your todos on a monthly calendar to see your schedule at a glance, spot conflicts, and plan ahead.
-
-### Accessing Calendar View
-
-#### From Main Page
-1. Click **"Calendar"** button (purple, top navigation)
-2. View switches to calendar layout
-3. URL changes to `/calendar`
-
-#### Navigation
-- **To Calendar**: Click "Calendar" button
-- **Back to List**: Browser back button or navigate to home
-- **Always available**: Calendar button visible on both pages
-
-### Calendar Features
-
-#### Monthly View
-- Full month calendar grid
-- Current month displayed by default
-- Days organized in week rows
-- Week starts on Sunday (configurable)
-
-#### Todo Display on Calendar
-- Todos appear on their due date
-- Color-coded by priority:
-  - 🔴 High priority in red
-  - 🟡 Medium priority in yellow
-  - 🔵 Low priority in blue
-- Todo titles shown on date cells
-- Multiple todos stack on same date
-
-#### Holiday Integration
-- Public holidays displayed (if configured)
-- Special styling for holidays
-- Holiday names shown
-- Helps with planning around holidays
-
-#### Visual Design
-- Clean, minimal interface
-- Responsive grid layout
-- Dark mode support
-- Color-coded for easy scanning
-
-### Calendar Navigation
-
-#### Month Navigation
-- Previous month button (◀)
-- Current month/year display
-- Next month button (▶)
-- Today button (jumps to current month)
-
-#### Date Selection
-- Click any date to view details
-- Current day highlighted
-- Past dates grayed out
-- Future dates emphasized
-
-### Integration with Main App
-
-#### Data Synchronization
-- Calendar shows same todos as list view
-- Changes sync automatically
-- Real-time updates
-- No separate data storage
-
-#### Filtering
-- Calendar respects active filters (if applicable)
-- Shows only relevant todos
-- Updates when filters change
-
-### Use Cases
-
-#### Planning
-- 📅 Visualize weekly workload
-- 📅 Spot busy vs. light days
-- 📅 Balance task distribution
-- 📅 Identify scheduling conflicts
-
-#### Review
-- 📊 See completed tasks by date
-- 📊 Track productivity patterns
-- 📊 Review past week/month
-- 📊 Identify trends
-
-#### Scheduling
-- 🗓️ Find open slots for new tasks
-- 🗓️ Avoid overloading specific days
-- 🗓️ Plan around holidays
-- 🗓️ Distribute recurring tasks
-
-### Tips
-
-#### Effective Calendar Use
-- Check calendar when planning week
-- Review at start of each day
-- Use for big-picture overview
-- Switch to list view for details
-
-#### Visual Scanning
-- Red (high priority) spots immediate attention
-- Look for clustering (too many on one day)
-- Use color patterns to balance priorities
-- Note holiday conflicts
 
 ---
 

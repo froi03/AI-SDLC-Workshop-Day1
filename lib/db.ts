@@ -27,7 +27,12 @@ const FALLBACK_TAG_COLOR = '#3B82F6';
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE
+    email TEXT UNIQUE,
+    display_name TEXT,
+    current_challenge TEXT,
+    current_challenge_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS todos (
@@ -54,6 +59,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_todos_priority ON todos(user_id, priority);
 `);
 
+ensureUserTable();
+ensureAuthenticatorTables();
 ensureTodoConstraints();
 ensureTagTables();
 ensureSubtaskTables();
@@ -61,12 +68,77 @@ ensureTemplateTables();
 ensureHolidayTables();
 
 const ensureDefaultUser = db.prepare(`
-  INSERT INTO users (id, email)
-  SELECT 1, 'demo@example.com'
+  INSERT INTO users (id, email, display_name, created_at, updated_at)
+  SELECT 1, 'demo@example.com', 'Demo User', @now, @now
   WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = 1)
 `);
 
-ensureDefaultUser.run();
+ensureDefaultUser.run({ now: singaporeUtcIso() });
+
+function ensureUserTable() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE,
+      display_name TEXT,
+      current_challenge TEXT,
+      current_challenge_expires_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  const columns = db.prepare<{ name: string }>(`PRAGMA table_info('users')`).all() as { name: string }[];
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has('display_name')) {
+    db.exec(`ALTER TABLE users ADD COLUMN display_name TEXT`);
+  }
+  if (!columnNames.has('current_challenge')) {
+    db.exec(`ALTER TABLE users ADD COLUMN current_challenge TEXT`);
+  }
+  if (!columnNames.has('current_challenge_expires_at')) {
+    db.exec(`ALTER TABLE users ADD COLUMN current_challenge_expires_at TEXT`);
+  }
+  if (!columnNames.has('created_at')) {
+    db.exec(`ALTER TABLE users ADD COLUMN created_at TEXT`);
+  }
+  if (!columnNames.has('updated_at')) {
+    db.exec(`ALTER TABLE users ADD COLUMN updated_at TEXT`);
+  }
+
+  const nowIso = singaporeUtcIso();
+  db.prepare(`
+    UPDATE users
+    SET created_at = COALESCE(created_at, @now),
+        updated_at = COALESCE(updated_at, @now)
+    WHERE created_at IS NULL OR updated_at IS NULL
+  `).run({ now: nowIso });
+
+  db.exec(`UPDATE users SET email = LOWER(TRIM(email)) WHERE email IS NOT NULL`);
+  db.exec(`UPDATE users SET display_name = TRIM(display_name) WHERE display_name IS NOT NULL`);
+  db.exec(`UPDATE users SET display_name = email WHERE (display_name IS NULL OR display_name = '') AND email IS NOT NULL`);
+}
+
+function ensureAuthenticatorTables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS authenticators (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      credential_id TEXT NOT NULL UNIQUE,
+      public_key TEXT NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      transports TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_authenticators_user ON authenticators(user_id);
+  `);
+}
 
 function ensureTodoConstraints() {
   const tableSqlRow = db
@@ -418,6 +490,48 @@ export interface Holiday {
   updatedAt: string;
 }
 
+export interface User {
+  id: number;
+  email: string;
+  displayName: string;
+  currentChallenge: string | null;
+  currentChallengeExpiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Authenticator {
+  id: number;
+  userId: number;
+  credentialId: string;
+  publicKey: string;
+  counter: number;
+  transports: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+type UserRow = {
+  id: number;
+  email: string;
+  display_name: string | null;
+  current_challenge: string | null;
+  current_challenge_expires_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type AuthenticatorRow = {
+  id: number;
+  user_id: number;
+  credential_id: string;
+  public_key: string;
+  counter: number | null;
+  transports: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type TodoRow = {
   id: number;
   user_id: number;
@@ -485,6 +599,209 @@ type TemplateRow = {
   created_at: string;
   updated_at: string;
 };
+
+const insertUserStmt = db.prepare(`
+  INSERT INTO users (
+    email,
+    display_name,
+    current_challenge,
+    current_challenge_expires_at,
+    created_at,
+    updated_at
+  ) VALUES (?, ?, NULL, NULL, ?, ?)
+`);
+
+const selectUserByEmailStmt = db.prepare<UserRow | undefined>(
+  `SELECT * FROM users WHERE email = ? COLLATE NOCASE`
+);
+
+const selectUserByIdStmt = db.prepare<UserRow | undefined>(`SELECT * FROM users WHERE id = ?`);
+
+const updateUserChallengeStmt = db.prepare(`
+  UPDATE users
+  SET current_challenge = ?, current_challenge_expires_at = ?, updated_at = ?
+  WHERE id = ?
+`);
+
+const clearUserChallengeStmt = db.prepare(`
+  UPDATE users
+  SET current_challenge = NULL,
+      current_challenge_expires_at = NULL,
+      updated_at = ?
+  WHERE id = ?
+`);
+
+const selectAuthenticatorsByUserStmt = db.prepare<AuthenticatorRow[]>(
+  `SELECT * FROM authenticators WHERE user_id = ? ORDER BY id ASC`
+);
+
+const selectAuthenticatorByCredentialStmt = db.prepare<AuthenticatorRow | undefined>(
+  `SELECT * FROM authenticators WHERE credential_id = ? AND user_id = ?`
+);
+
+const upsertAuthenticatorStmt = db.prepare(`
+  INSERT INTO authenticators (
+    user_id,
+    credential_id,
+    public_key,
+    counter,
+    transports,
+    created_at,
+    updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(credential_id) DO UPDATE SET
+    user_id = excluded.user_id,
+    public_key = excluded.public_key,
+    counter = excluded.counter,
+    transports = excluded.transports,
+    updated_at = excluded.updated_at
+`);
+
+const updateAuthenticatorCounterStmt = db.prepare(`
+  UPDATE authenticators
+  SET counter = ?, updated_at = ?
+  WHERE id = ?
+`);
+
+function normalizeUserEmail(input: string): string {
+  if (typeof input !== 'string') {
+    return '';
+  }
+  return input.trim().toLowerCase();
+}
+
+function normalizeUserDisplayName(input: string | null | undefined): string {
+  if (typeof input !== 'string') {
+    return '';
+  }
+  const trimmed = input.trim();
+  return trimmed.length > 120 ? trimmed.slice(0, 120) : trimmed;
+}
+
+export const userDB = {
+  create(input: { email: string; displayName: string }): User {
+    const email = normalizeUserEmail(input.email);
+    if (!email) {
+      throw new Error('Email is required');
+    }
+
+    const displayNameRaw = normalizeUserDisplayName(input.displayName);
+    const displayName = displayNameRaw || email;
+    const now = singaporeUtcIso();
+    const result = insertUserStmt.run(email, displayName, now, now);
+    const createdId = Number(result.lastInsertRowid);
+    const createdRow = selectUserByIdStmt.get(createdId) as UserRow | undefined;
+    if (!createdRow) {
+      throw new Error('Failed to create user');
+    }
+    return mapUser(createdRow);
+  },
+
+  findByEmail(email: string): User | null {
+    const normalized = normalizeUserEmail(email);
+    if (!normalized) {
+      return null;
+    }
+    const row = selectUserByEmailStmt.get(normalized) as UserRow | undefined;
+    return row ? mapUser(row) : null;
+  },
+
+  getById(id: number): User | null {
+    const row = selectUserByIdStmt.get(id) as UserRow | undefined;
+    return row ? mapUser(row) : null;
+  },
+
+  setChallenge(userId: number, challenge: string, expiresAt: string | null): void {
+    const now = singaporeUtcIso();
+    updateUserChallengeStmt.run(challenge, expiresAt, now, userId);
+  },
+
+  clearChallenge(userId: number): void {
+    const now = singaporeUtcIso();
+    clearUserChallengeStmt.run(now, userId);
+  }
+};
+
+export const authenticatorDB = {
+  listByUser(userId: number): Authenticator[] {
+    const rows = selectAuthenticatorsByUserStmt.all(userId) as AuthenticatorRow[];
+    return rows.map(mapAuthenticator);
+  },
+
+  findByCredentialId(userId: number, credentialId: string): Authenticator | null {
+    const row = selectAuthenticatorByCredentialStmt.get(credentialId, userId) as AuthenticatorRow | undefined;
+    return row ? mapAuthenticator(row) : null;
+  },
+
+  upsert(input: { userId: number; credentialId: string; publicKey: string; counter: number; transports: string[] }): Authenticator {
+    const now = singaporeUtcIso();
+    const transports = Array.isArray(input.transports)
+      ? input.transports.filter((value): value is string => typeof value === 'string')
+      : [];
+    const transportsJson = JSON.stringify(Array.from(new Set(transports)));
+
+    upsertAuthenticatorStmt.run(
+      input.userId,
+      input.credentialId,
+      input.publicKey,
+      input.counter ?? 0,
+      transportsJson,
+      now,
+      now
+    );
+
+    const row = selectAuthenticatorByCredentialStmt.get(input.credentialId, input.userId) as AuthenticatorRow | undefined;
+    if (!row) {
+      throw new Error('Failed to persist authenticator');
+    }
+    return mapAuthenticator(row);
+  },
+
+  updateCounter(id: number, counter: number): void {
+    const now = singaporeUtcIso();
+    updateAuthenticatorCounterStmt.run(counter ?? 0, now, id);
+  }
+};
+
+function mapUser(row: UserRow): User {
+  const fallbackTimestamp = singaporeUtcIso();
+  const createdAt = row.created_at ?? fallbackTimestamp;
+  const updatedAt = row.updated_at ?? createdAt;
+  return {
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name ?? row.email,
+    currentChallenge: row.current_challenge ?? null,
+    currentChallengeExpiresAt: row.current_challenge_expires_at ?? null,
+    createdAt,
+    updatedAt
+  };
+}
+
+function mapAuthenticator(row: AuthenticatorRow): Authenticator {
+  let transports: string[] = [];
+  if (row.transports) {
+    try {
+      const parsed = JSON.parse(row.transports);
+      if (Array.isArray(parsed)) {
+        transports = parsed.filter((value): value is string => typeof value === 'string');
+      }
+    } catch (error) {
+      console.error('Failed to parse authenticator transports', error);
+    }
+  }
+
+  return {
+    id: row.id,
+    userId: row.user_id,
+    credentialId: row.credential_id,
+    publicKey: row.public_key,
+    counter: row.counter ?? 0,
+    transports,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
 
 function mapTag(row: TagRow): Tag {
   return {

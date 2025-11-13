@@ -226,6 +226,21 @@ todo-app/
 
 ## 5. Run the Application
 
+### Configure Environment Variables
+Create an `.env.local` file in the project root before starting the server:
+
+```bash
+JWT_SECRET="replace-with-a-strong-random-string"
+RP_NAME="Todo App"
+RP_ID="localhost"
+RP_ORIGIN="http://localhost:3000"
+```
+
+- `JWT_SECRET`: 32+ character string used to sign session cookies. Generate with `openssl rand -hex 32` or an equivalent command.
+- `RP_NAME`: Display name shown in WebAuthn prompts.
+- `RP_ID`: Domain component for WebAuthn. Use your deployed hostname in production (e.g., `example.com`).
+- `RP_ORIGIN`: Full origin (protocol + host + optional port) that matches where the app is served. Update this when deploying.
+
 ### Start Development Server
 ```bash
 npm run dev
@@ -248,9 +263,9 @@ Expected output:
 
 ### First-Time Setup
 1. **Register a new account**:
-   - Enter username (e.g., "testuser")
-   - Click "Register"
-   - Follow WebAuthn prompt (use fingerprint/face ID/PIN)
+   - Enter an email address (e.g., `demo@example.com`) and display name
+   - Click **Register passkey**
+   - Approve the WebAuthn prompt (Touch ID, Windows Hello, security key, etc.)
    
 2. **Create your first todo**:
    - Enter todo title: "Test my first todo"

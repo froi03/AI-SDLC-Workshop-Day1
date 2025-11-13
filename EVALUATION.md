@@ -17,6 +17,11 @@ This document provides a comprehensive checklist for evaluating the completeness
 
 ## Core Features Evaluation
 
+### Completed Features Snapshot
+- ✅ Export & import JSON workflows
+- ✅ Calendar view with Singapore holidays and todo overlay
+- ✅ WebAuthn authentication (passkey registration/login) with JWT-backed sessions
+
 ### ✅ Feature 01: Todo CRUD Operations
 **Status:** ⬜ Not Started | ⬜ In Progress | ⬜ Complete | ⬜ Verified
 
