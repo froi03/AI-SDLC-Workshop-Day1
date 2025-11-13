@@ -1,10 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, FormEvent } from 'react';
 import { DateTime } from 'luxon';
-import type { Priority, ProgressStats, RecurrencePattern, Subtask, Tag, TagWithCounts, Todo } from '@/lib/db';
+import type {
+  Priority,
+  ProgressStats,
+  RecurrencePattern,
+  Subtask,
+  Tag,
+  TagWithCounts,
+  Template,
+  TemplateSubtaskDefinition,
+  Todo
+} from '@/lib/db';
 import { useNotifications } from '@/lib/hooks/useNotifications';
+import { filterTodos } from '@/lib/filterTodos';
 import { formatSingaporeDate, getSingaporeNow } from '@/lib/timezone';
 
 const priorityOptions: Priority[] = ['high', 'medium', 'low'];
@@ -21,6 +32,7 @@ const PRIORITY_BADGE_STYLES: Record<Priority, { background: string; border: stri
 };
 
 const DEFAULT_TAG_COLOR = '#3B82F6';
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 
 function stripCounts(tag: TagWithCounts): Tag {
   const { todoCount: _count, ...rest } = tag;
@@ -69,6 +81,34 @@ const INITIAL_FORM: CreateTodoForm = {
   description: '',
   priority: 'medium',
   dueDate: '',
+  isRecurring: false,
+  recurrencePattern: 'daily',
+  reminderMinutes: '',
+  tagIds: []
+};
+
+interface TemplateFormState {
+  name: string;
+  description: string;
+  category: string;
+  todoTitle: string;
+  todoDescription: string;
+  dueOffsetDays: string;
+  priority: Priority;
+  isRecurring: boolean;
+  recurrencePattern: RecurrencePattern;
+  reminderMinutes: string;
+  tagIds: number[];
+}
+
+const INITIAL_TEMPLATE_FORM: TemplateFormState = {
+  name: '',
+  description: '',
+  category: '',
+  todoTitle: '',
+  todoDescription: '',
+  dueOffsetDays: '0',
+  priority: 'medium',
   isRecurring: false,
   recurrencePattern: 'daily',
   reminderMinutes: '',
@@ -172,6 +212,63 @@ function singaporeNowUtcIso(): string {
   return iso;
 }
 
+function buildTemplateFormFromTodo(todo: Todo): {
+  form: TemplateFormState;
+  subtasks: TemplateSubtaskDefinition[];
+} {
+  let dueOffsetDays = '0';
+  if (todo.dueDate) {
+    const due = DateTime.fromISO(todo.dueDate).setZone('Asia/Singapore');
+    if (due.isValid) {
+      const diff = Math.max(0, Math.round(due.startOf('day').diff(getSingaporeNow().startOf('day'), 'days').days));
+      dueOffsetDays = String(diff);
+    }
+  }
+
+  const form: TemplateFormState = {
+    name: todo.title,
+    description: '',
+    category: '',
+    todoTitle: todo.title,
+    todoDescription: todo.description,
+    dueOffsetDays,
+    priority: todo.priority,
+    isRecurring: todo.isRecurring,
+    recurrencePattern: todo.recurrencePattern ?? 'daily',
+    reminderMinutes: todo.reminderMinutes != null ? String(todo.reminderMinutes) : '',
+    tagIds: todo.tags.map((tag) => tag.id)
+  };
+
+  const subtasks = todo.subtasks
+    .map<TemplateSubtaskDefinition>((subtask) => ({ title: subtask.title, position: subtask.position }))
+    .sort((a, b) => a.position - b.position);
+
+  return { form, subtasks };
+}
+
+function buildTemplateFormFromTemplate(template: Template): {
+  form: TemplateFormState;
+  subtasks: TemplateSubtaskDefinition[];
+} {
+  const form: TemplateFormState = {
+    name: template.name,
+    description: template.description ?? '',
+    category: template.category ?? '',
+    todoTitle: template.todoTitle,
+    todoDescription: template.todoDescription,
+    dueOffsetDays: String(template.dueOffsetDays),
+    priority: template.priority,
+    isRecurring: template.recurrencePattern != null,
+    recurrencePattern: template.recurrencePattern ?? 'daily',
+    reminderMinutes: template.reminderMinutes != null ? String(template.reminderMinutes) : '',
+    tagIds: [...template.tagIds]
+  };
+
+  const subtasks = [...template.subtasks].sort((a, b) => a.position - b.position);
+
+  return { form, subtasks };
+}
+
 export default function TodoPage() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [uiState, setUiState] = useState<UiState>({ loading: true, error: null });
@@ -179,9 +276,11 @@ export default function TodoPage() {
   const [editing, setEditing] = useState<Todo | null>(null);
   const [editErrors, setEditErrors] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
+  const [searchInput, setSearchInput] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [selectedPriority, setSelectedPriority] = useState<PriorityFilter>('all');
+  const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
   const [tags, setTags] = useState<TagWithCounts[]>([]);
-  const [tagFilter, setTagFilter] = useState<number | null>(null);
   const [isTagModalOpen, setTagModalOpen] = useState(false);
   const [tagForm, setTagForm] = useState({ name: '', color: DEFAULT_TAG_COLOR, description: '' });
   const [tagFormError, setTagFormError] = useState<string | null>(null);
@@ -197,6 +296,34 @@ export default function TodoPage() {
   const [creatingSubtaskTodoIds, setCreatingSubtaskTodoIds] = useState<number[]>([]);
   const [updatingSubtaskIds, setUpdatingSubtaskIds] = useState<number[]>([]);
   const [expandedTodoIds, setExpandedTodoIds] = useState<number[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templateNotice, setTemplateNotice] = useState<string | null>(null);
+  const [isTemplateModalOpen, setTemplateModalOpen] = useState(false);
+  const [templateModalMode, setTemplateModalMode] = useState<'create' | 'edit'>('create');
+  const [templateSourceTodo, setTemplateSourceTodo] = useState<Todo | null>(null);
+  const [templateEditTarget, setTemplateEditTarget] = useState<Template | null>(null);
+  const [templateForm, setTemplateForm] = useState<TemplateFormState>({ ...INITIAL_TEMPLATE_FORM });
+  const [templateSubtasksPreview, setTemplateSubtasksPreview] = useState<TemplateSubtaskDefinition[]>([]);
+  const [templateFormError, setTemplateFormError] = useState<string | null>(null);
+  const [templateSubmitting, setTemplateSubmitting] = useState(false);
+  const [isTemplateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [templateManagerError, setTemplateManagerError] = useState<string | null>(null);
+  const [isTemplateUseModalOpen, setTemplateUseModalOpen] = useState(false);
+  const [templateUseTargetId, setTemplateUseTargetId] = useState<number | null>(null);
+  const [templateUseDueDate, setTemplateUseDueDate] = useState('');
+  const [templateUseOffset, setTemplateUseOffset] = useState('');
+  const [templateUseError, setTemplateUseError] = useState<string | null>(null);
+  const [templateUseSubmitting, setTemplateUseSubmitting] = useState(false);
+  const [templateMissingTags, setTemplateMissingTags] = useState<number[]>([]);
+  const [templateDeleteTarget, setTemplateDeleteTarget] = useState<Template | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSummary, setImportSummary] = useState<{ todos: number; subtasks: number; tags: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const {
     isSupported: notificationsSupported,
     permission: notificationPermission,
@@ -233,13 +360,27 @@ export default function TodoPage() {
       const retrieved = data.tags ?? [];
       setTags(retrieved);
       syncTodosWithTagList(retrieved);
-      if (tagFilter != null && !retrieved.some((tag) => tag.id === tagFilter)) {
-        setTagFilter(null);
-      }
+      setSelectedTagIds((prev) => prev.filter((id) => retrieved.some((tag) => tag.id === id)));
     } catch (error) {
       console.error(error);
     }
-  }, [syncTodosWithTagList, tagFilter]);
+  }, [syncTodosWithTagList]);
+
+  const loadTemplates = useCallback(async () => {
+    setTemplatesLoading(true);
+    try {
+      const response = await fetch('/api/templates', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('Failed to load templates');
+      }
+      const data = (await response.json()) as { templates?: Template[] };
+      setTemplates(data.templates ?? []);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setTemplatesLoading(false);
+    }
+  }, []);
 
   const loadTodos = useCallback(async () => {
     setUiState((prev) => ({ ...prev, loading: true }));
@@ -280,15 +421,65 @@ export default function TodoPage() {
     loadTags();
   }, [loadTags]);
 
+  useEffect(() => {
+    loadTemplates();
+  }, [loadTemplates]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchInput.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
   const filteredTodos = useMemo(() => {
-    const byPriority = priorityFilter === 'all' ? todos : todos.filter((todo) => todo.priority === priorityFilter);
-    if (tagFilter == null) {
-      return byPriority;
-    }
-    return byPriority.filter((todo) => todo.tags.some((tag) => tag.id === tagFilter));
-  }, [todos, priorityFilter, tagFilter]);
+    const priority = selectedPriority === 'all' ? null : selectedPriority;
+    return filterTodos(todos, {
+      query: debouncedSearchQuery,
+      priority,
+      tagIds: selectedTagIds
+    });
+  }, [todos, debouncedSearchQuery, selectedPriority, selectedTagIds]);
+
+  const searchQueryDisplay = searchInput.trim();
+  const hasSearchFilter = searchQueryDisplay.length > 0;
+  const hasPriorityFilter = selectedPriority !== 'all';
+  const hasTagFilters = selectedTagIds.length > 0;
+  const hasActiveFilters = hasSearchFilter || hasPriorityFilter || hasTagFilters;
 
   const sections = useMemo(() => groupTodos(filteredTodos), [filteredTodos]);
+
+  const filteredTemplates = useMemo(() => {
+    const query = templateSearch.trim().toLowerCase();
+    if (!query) {
+      return templates;
+    }
+    return templates.filter((template) => {
+      return (
+        template.name.toLowerCase().includes(query) ||
+        (template.category ?? '').toLowerCase().includes(query)
+      );
+    });
+  }, [templates, templateSearch]);
+
+  const templatesByCategory = useMemo(() => {
+    const map = new Map<string, Template[]>();
+    for (const template of filteredTemplates) {
+      const key = (template.category ?? '').trim().length > 0 ? template.category!.trim() : 'General';
+      const existing = map.get(key);
+      if (existing) {
+        existing.push(template);
+      } else {
+        map.set(key, [template]);
+      }
+    }
+    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [filteredTemplates]);
+
+  const selectedTemplateForUse = useMemo(
+    () => templates.find((template) => template.id === templateUseTargetId) ?? null,
+    [templates, templateUseTargetId]
+  );
 
   const updateCreateForm = (updates: Partial<CreateTodoForm>) => {
     setCreateForm((prev) => ({ ...prev, ...updates }));
@@ -302,8 +493,435 @@ export default function TodoPage() {
     });
   };
 
-  const handleTagFilterToggle = (tagId: number) => {
-    setTagFilter((prev) => (prev === tagId ? null : tagId));
+  const handleTagToggle = (tagId: number) => {
+    setSelectedTagIds((prev) => (prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]));
+  };
+
+  const clearSearchFilter = () => {
+    setSearchInput('');
+    setDebouncedSearchQuery('');
+  };
+
+  const clearPriorityFilter = () => {
+    setSelectedPriority('all');
+  };
+
+  const clearTagFilters = () => {
+    setSelectedTagIds([]);
+  };
+
+  const clearAllFilters = () => {
+    clearSearchFilter();
+    clearPriorityFilter();
+    clearTagFilters();
+  };
+
+  const handleExport = useCallback(async () => {
+    setExportError(null);
+    setExporting(true);
+    try {
+      const response = await fetch('/api/todos/export', { cache: 'no-store' });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({ error: 'Failed to export todos' }));
+        throw new Error(data.error ?? 'Failed to export todos');
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition');
+      const match = disposition?.match(/filename="?([^";]+)"?/i);
+      const fallback = getSingaporeNow().toFormat('yyyyLLdd-HHmmss');
+      const filename = match?.[1] ?? `todos-export-${fallback}.json`;
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError((error as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+
+  const handleImportClick = useCallback(() => {
+    setImportError(null);
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleImportFileChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) {
+        return;
+      }
+
+      setImportError(null);
+      setImportSummary(null);
+
+      if (file.size > MAX_IMPORT_BYTES) {
+        setImportError('Import file exceeds 5MB limit');
+        event.target.value = '';
+        return;
+      }
+
+      setImporting(true);
+      try {
+        const text = await file.text();
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new Error('Import file is not valid JSON');
+        }
+
+        const response = await fetch('/api/todos/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsed)
+        });
+
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok || !data) {
+          const message = (data as { error?: string } | null)?.error ?? 'Failed to import todos';
+          throw new Error(message);
+        }
+
+        setImportSummary({
+          todos: (data as { importedTodosCount?: number }).importedTodosCount ?? 0,
+          subtasks: (data as { importedSubtasksCount?: number }).importedSubtasksCount ?? 0,
+          tags: (data as { importedTagsCount?: number }).importedTagsCount ?? 0
+        });
+
+        await loadTodos();
+        await loadTags();
+      } catch (error) {
+        setImportError((error as Error).message);
+      } finally {
+        setImporting(false);
+        event.target.value = '';
+      }
+    },
+    [loadTags, loadTodos]
+  );
+
+  const resetTemplateModalState = () => {
+    setTemplateModalOpen(false);
+    setTemplateModalMode('create');
+    setTemplateSourceTodo(null);
+    setTemplateEditTarget(null);
+    setTemplateForm({ ...INITIAL_TEMPLATE_FORM });
+    setTemplateSubtasksPreview([]);
+    setTemplateFormError(null);
+    setTemplateSubmitting(false);
+  };
+
+  const openSaveTemplateModal = (todo: Todo) => {
+    const { form, subtasks } = buildTemplateFormFromTodo(todo);
+    const validTagIds = form.tagIds.filter((id) => tags.some((tag) => tag.id === id));
+    setTemplateForm({ ...form, tagIds: validTagIds });
+    setTemplateSubtasksPreview(subtasks);
+    setTemplateSourceTodo(todo);
+    setTemplateEditTarget(null);
+    setTemplateModalMode('create');
+    setTemplateFormError(null);
+    setTemplateSubmitting(false);
+    setTemplateModalOpen(true);
+  };
+
+  const openEditTemplateModal = (template: Template) => {
+    const { form, subtasks } = buildTemplateFormFromTemplate(template);
+    const validTagIds = form.tagIds.filter((id) => tags.some((tag) => tag.id === id));
+    setTemplateForm({ ...form, tagIds: validTagIds });
+    setTemplateSubtasksPreview(subtasks);
+    setTemplateSourceTodo(null);
+    setTemplateEditTarget(template);
+    setTemplateModalMode('edit');
+    setTemplateFormError(null);
+    setTemplateSubmitting(false);
+    setTemplateModalOpen(true);
+  };
+
+  const updateTemplateFormState = (updates: Partial<TemplateFormState>) => {
+    setTemplateForm((prev) => ({ ...prev, ...updates }));
+  };
+
+  const toggleTemplateTagSelection = (tagId: number) => {
+    setTemplateForm((prev) => {
+      const exists = prev.tagIds.includes(tagId);
+      const tagIds = exists ? prev.tagIds.filter((id) => id !== tagId) : [...prev.tagIds, tagId];
+      return { ...prev, tagIds };
+    });
+  };
+
+  const handleTemplateRecurringToggle = (isRecurring: boolean) => {
+    setTemplateForm((prev) => ({
+      ...prev,
+      isRecurring,
+      recurrencePattern: isRecurring ? prev.recurrencePattern : 'daily'
+    }));
+  };
+
+  const closeTemplateModal = () => {
+    resetTemplateModalState();
+  };
+
+  const requestDeleteTemplate = (template: Template) => {
+    setTemplateManagerError(null);
+    setTemplateDeleteTarget(template);
+  };
+
+  const cancelDeleteTemplate = () => {
+    setTemplateDeleteTarget(null);
+  };
+
+  const confirmDeleteTemplate = async () => {
+    if (!templateDeleteTarget) {
+      return;
+    }
+
+    setTemplateManagerError(null);
+    try {
+      const response = await fetch(`/api/templates/${templateDeleteTarget.id}`, { method: 'DELETE' });
+      const data = await response.json().catch(() => ({ error: 'Failed to delete template' }));
+      if (!response.ok) {
+        throw new Error((data as { error?: string }).error ?? 'Failed to delete template');
+      }
+      setTemplateNotice(`Deleted template "${templateDeleteTarget.name}".`);
+      setTemplateDeleteTarget(null);
+      await loadTemplates();
+    } catch (error) {
+      setTemplateManagerError((error as Error).message);
+    }
+  };
+
+  const openTemplateManagerModal = () => {
+    setTemplateManagerError(null);
+    setTemplateSearch('');
+    setTemplateManagerOpen(true);
+  };
+
+  const clearTemplateNotice = () => {
+    setTemplateNotice(null);
+    setTemplateMissingTags([]);
+  };
+
+  const openTemplateUseModal = (templateId?: number) => {
+    if (templates.length === 0) {
+      setTemplateNotice('No templates available yet. Save a template from an existing todo first.');
+      return;
+    }
+    const fallbackId = templates[0]?.id ?? null;
+    setTemplateUseTargetId(templateId ?? fallbackId);
+    setTemplateUseDueDate('');
+    setTemplateUseOffset('');
+    setTemplateUseError(null);
+    setTemplateUseSubmitting(false);
+    setTemplateMissingTags([]);
+    setTemplateUseModalOpen(true);
+  };
+
+  const closeTemplateUseModal = () => {
+    setTemplateUseModalOpen(false);
+    setTemplateUseTargetId(null);
+    setTemplateUseError(null);
+    setTemplateUseSubmitting(false);
+  };
+
+  const handleTemplateUseSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setTemplateUseError(null);
+    if (templateUseTargetId == null) {
+      setTemplateUseError('Select a template to use.');
+      return;
+    }
+
+    let dueDateIso: string | null | undefined;
+    if (templateUseDueDate.trim().length > 0) {
+      const converted = toSingaporeIso(templateUseDueDate.trim());
+      if (!converted) {
+        setTemplateUseError('Provide a valid due date.');
+        return;
+      }
+      dueDateIso = converted;
+    }
+
+    let dueOffsetValue: number | null | undefined;
+    if (templateUseOffset.trim().length > 0) {
+      const numeric = Number.parseInt(templateUseOffset.trim(), 10);
+      if (!Number.isInteger(numeric) || numeric < 0) {
+        setTemplateUseError('Offset must be a non-negative integer.');
+        return;
+      }
+      dueOffsetValue = numeric;
+    }
+
+    setTemplateUseSubmitting(true);
+    try {
+      const response = await fetch(`/api/templates/${templateUseTargetId}/use`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dueDate: dueDateIso ?? undefined,
+          dueOffsetDays: dueOffsetValue ?? undefined
+        })
+      });
+
+      const data = await response.json().catch(() => ({ error: 'Failed to use template' }));
+      if (!response.ok) {
+        throw new Error((data as { error?: string }).error ?? 'Failed to use template');
+      }
+
+      const { todo, missingTagIds } = data as {
+        todo: Todo;
+        missingTagIds?: number[];
+      };
+
+      setTodos((prev) => [todo, ...prev.filter((existing) => existing.id !== todo.id)]);
+      if (todo.subtasks.length > 0) {
+        setExpandedTodoIds((prev) => (prev.includes(todo.id) ? prev : [todo.id, ...prev]));
+      }
+      setTemplateMissingTags(missingTagIds ?? []);
+      setTemplateNotice('Todo created from template.');
+      closeTemplateUseModal();
+      await loadTags();
+    } catch (error) {
+      setTemplateUseError((error as Error).message);
+    } finally {
+      setTemplateUseSubmitting(false);
+    }
+  };
+
+  const handleTemplateSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setTemplateFormError(null);
+
+    const trimmedName = templateForm.name.trim();
+    if (trimmedName.length === 0) {
+      setTemplateFormError('Template name is required.');
+      return;
+    }
+    if (trimmedName.length > 80) {
+      setTemplateFormError('Template name must be at most 80 characters.');
+      return;
+    }
+
+    const trimmedDescription = templateForm.description.trim();
+    if (trimmedDescription.length > 500) {
+      setTemplateFormError('Description must be 500 characters or fewer.');
+      return;
+    }
+
+    const trimmedCategory = templateForm.category.trim();
+    if (trimmedCategory.length > 40) {
+      setTemplateFormError('Category must be 40 characters or fewer.');
+      return;
+    }
+
+    const todoTitle = templateForm.todoTitle.trim();
+    if (todoTitle.length === 0) {
+      setTemplateFormError('Todo title is required.');
+      return;
+    }
+    if (todoTitle.length > 200) {
+      setTemplateFormError('Todo title must be at most 200 characters.');
+      return;
+    }
+
+    const todoDescription = templateForm.todoDescription.trim();
+    if (todoDescription.length > 2000) {
+      setTemplateFormError('Todo description must be at most 2000 characters.');
+      return;
+    }
+
+    const dueOffset = Number.parseInt(templateForm.dueOffsetDays, 10);
+    if (!Number.isFinite(dueOffset) || dueOffset < 0) {
+      setTemplateFormError('Due offset must be a non-negative integer.');
+      return;
+    }
+
+    const reminderMinutes = templateForm.reminderMinutes
+      ? Number.parseInt(templateForm.reminderMinutes, 10)
+      : null;
+  if (reminderMinutes != null && !reminderOptions.includes(reminderMinutes)) {
+      setTemplateFormError('Invalid reminder option selected.');
+      return;
+    }
+
+    if (!priorityOptions.includes(templateForm.priority)) {
+      setTemplateFormError('Invalid priority selected.');
+      return;
+    }
+
+    const recurrencePattern = templateForm.isRecurring ? templateForm.recurrencePattern : null;
+    if (templateForm.isRecurring && !recurrencePattern) {
+      setTemplateFormError('Recurring templates require a recurrence pattern.');
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      name: trimmedName,
+      description: trimmedDescription.length === 0 ? null : trimmedDescription,
+      category: trimmedCategory.length === 0 ? null : trimmedCategory,
+      todoTitle,
+      todoDescription,
+      priority: templateForm.priority,
+      recurrencePattern,
+      reminderMinutes,
+      dueOffsetDays: dueOffset,
+      tagIds: templateForm.tagIds,
+      subtasks: templateSubtasksPreview,
+      estimatedDurationMinutes: null
+    };
+
+    let endpoint = '/api/templates';
+    let method: 'POST' | 'PUT' = 'POST';
+    if (templateModalMode === 'edit') {
+      if (!templateEditTarget) {
+        setTemplateFormError('Template not selected for editing.');
+        return;
+      }
+      endpoint = `/api/templates/${templateEditTarget.id}`;
+      method = 'PUT';
+    } else if (!templateSourceTodo) {
+      setTemplateFormError('Unable to determine template source todo.');
+      return;
+    }
+
+    setTemplateSubmitting(true);
+    try {
+      const response = await fetch(endpoint, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...payload,
+          reminderMinutes,
+          recurrencePattern,
+          tagIds: templateForm.tagIds,
+          subtasks: templateSubtasksPreview
+        })
+      });
+
+      const data = await response.json().catch(() => ({ error: 'Failed to save template' }));
+      if (!response.ok) {
+        throw new Error((data as { error?: string }).error ?? 'Failed to save template');
+      }
+
+      setTemplateNotice(templateModalMode === 'edit' ? 'Template updated successfully.' : 'Template created successfully.');
+      resetTemplateModalState();
+      await loadTemplates();
+      if (method === 'POST') {
+        openTemplateManagerModal();
+      }
+    } catch (error) {
+      setTemplateFormError((error as Error).message);
+    } finally {
+      setTemplateSubmitting(false);
+    }
   };
 
   const handleCreateTodo = async (event: FormEvent<HTMLFormElement>) => {
@@ -484,9 +1102,7 @@ export default function TodoPage() {
         }))
       );
 
-      if (tagFilter === tagDeleteTarget.id) {
-        setTagFilter(null);
-      }
+      setSelectedTagIds((prev) => prev.filter((id) => id !== tagDeleteTarget.id));
 
       setTagDeleteTarget(null);
       await loadTags();
@@ -909,6 +1525,26 @@ export default function TodoPage() {
         <p className="text-sm text-slate-300">All times in Singapore timezone (Asia/Singapore).</p>
       </header>
 
+      {templateNotice && (
+        <div className="rounded border border-blue-500/40 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
+          <div className="flex items-start justify-between gap-3">
+            <span>{templateNotice}</span>
+            <button
+              type="button"
+              onClick={clearTemplateNotice}
+              className="text-xs font-semibold uppercase tracking-wide text-blue-200 hover:text-white"
+            >
+              Dismiss
+            </button>
+          </div>
+          {templateMissingTags.length > 0 && (
+            <p className="mt-2 text-xs text-blue-200/80">
+              Missing tags: {templateMissingTags.join(', ')}. These tags no longer exist and were skipped.
+            </p>
+          )}
+        </div>
+      )}
+
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-5 shadow">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
@@ -953,6 +1589,55 @@ export default function TodoPage() {
           <p className="mt-2 text-xs text-amber-300">{notificationsError}</p>
         )}
       </section>
+
+        <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-5 shadow">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Export &amp; Import</h2>
+              <p className="text-xs text-slate-400">
+                Download a JSON backup or restore data from a previous export (max 5&nbsp;MB).
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleExport}
+                disabled={exporting}
+                className="rounded border border-blue-500 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-200 hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              >
+                {exporting ? 'Preparing export…' : 'Export JSON'}
+              </button>
+              <button
+                type="button"
+                onClick={handleImportClick}
+                disabled={importing}
+                className="rounded border border-emerald-500 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-200 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+              >
+                {importing ? 'Importing…' : 'Import JSON'}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                onChange={handleImportFileChange}
+                className="hidden"
+              />
+            </div>
+          </div>
+          {(exportError || importError || importSummary) && (
+            <div className="mt-3 space-y-2 text-sm">
+              {exportError && <p className="text-red-400">{exportError}</p>}
+              {importError && <p className="text-red-400">{importError}</p>}
+              {importSummary && (
+                <p className="text-emerald-300">
+                  Imported {importSummary.todos} {importSummary.todos === 1 ? 'todo' : 'todos'}, {importSummary.subtasks}{' '}
+                  {importSummary.subtasks === 1 ? 'subtask' : 'subtasks'}, and {importSummary.tags}{' '}
+                  {importSummary.tags === 1 ? 'tag' : 'tags'}.
+                </p>
+              )}
+            </div>
+          )}
+        </section>
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6 shadow">
         <h2 className="text-xl font-semibold">Create Todo</h2>
@@ -1147,13 +1832,29 @@ export default function TodoPage() {
           </div>
 
           {createError && <p className="text-sm text-red-400">{createError}</p>}
-
-          <button
-            type="submit"
-            className="self-start rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
-          >
-            Create Todo
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="submit"
+              className="rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
+            >
+              Create Todo
+            </button>
+            <button
+              type="button"
+              onClick={() => openTemplateUseModal()}
+              disabled={templates.length === 0}
+              className="rounded border border-blue-500 px-4 py-2 text-sm font-semibold text-blue-200 hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+            >
+              Use Template
+            </button>
+            <button
+              type="button"
+              onClick={openTemplateManagerModal}
+              className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:border-blue-500 hover:text-blue-200"
+            >
+              Manage Templates
+            </button>
+          </div>
         </form>
       </section>
 
@@ -1161,95 +1862,154 @@ export default function TodoPage() {
       {uiState.error && <p className="text-sm text-red-400">{uiState.error}</p>}
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 shadow">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm font-semibold text-slate-200">Filter by priority</span>
-          <div className="flex flex-wrap gap-2">
-            {priorityFilterOptions.map((option) => {
-              const active = priorityFilter === option;
-              const label = option === 'all' ? 'All' : option.toUpperCase();
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => setPriorityFilter(option)}
-                  className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition ${
-                    active
-                      ? 'border-blue-400 bg-blue-500/20 text-blue-200'
-                      : 'border-slate-700 text-slate-300 hover:border-blue-400 hover:text-blue-200'
-                  }`}
-                  aria-pressed={active}
-                >
-                  {label}
-                </button>
-              );
-            })}
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <label htmlFor="todo-search" className="text-sm font-semibold text-slate-200">
+              Search todos
+            </label>
+            <input
+              id="todo-search"
+              type="search"
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+              placeholder="Search todos..."
+              aria-label="Search todos"
+              className="w-full rounded border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
           </div>
-        </div>
-        {priorityFilter !== 'all' && (
-          <div className="mt-3 flex items-center gap-3 text-xs uppercase">
-            <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 font-semibold text-blue-200">
-              Priority: {priorityFilter.toUpperCase()}
-            </span>
-            <button
-              type="button"
-              onClick={() => setPriorityFilter('all')}
-              className="text-[11px] font-medium text-slate-300 underline hover:text-white"
-            >
-              Clear
-            </button>
-          </div>
-        )}
-        <div className="mt-5 flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-slate-200">Filter by tag</span>
-            <button
-              type="button"
-              onClick={openTagModal}
-              className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:border-blue-500 hover:text-blue-200"
-            >
-              Manage tags
-            </button>
-          </div>
-          {tags.length === 0 ? (
-            <p className="text-xs text-slate-400">No tags to filter yet.</p>
-          ) : (
+
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-semibold text-slate-200">Priority</span>
             <div className="flex flex-wrap gap-2">
-              {tags.map((tag) => {
-                const active = tagFilter === tag.id;
-                const style = getTagBadgeStyle(tag.color);
+              {priorityFilterOptions.map((option) => {
+                const active = selectedPriority === option;
+                const label = option === 'all' ? 'All' : option.toUpperCase();
                 return (
                   <button
-                    key={tag.id}
+                    key={option}
                     type="button"
-                    onClick={() => handleTagFilterToggle(tag.id)}
+                    onClick={() => setSelectedPriority(option)}
                     className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition ${
-                      active ? 'shadow-[0_0_0_1px_rgba(59,130,246,0.5)]' : 'border-transparent'
+                      active
+                        ? 'border-blue-400 bg-blue-500/20 text-blue-200'
+                        : 'border-slate-700 text-slate-300 hover:border-blue-400 hover:text-blue-200'
                     }`}
-                    style={style}
                     aria-pressed={active}
                   >
-                    {tag.name}
+                    {label}
                   </button>
                 );
               })}
             </div>
-          )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-slate-200">Tags</span>
+              <button
+                type="button"
+                onClick={openTagModal}
+                className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:border-blue-500 hover:text-blue-200"
+              >
+                Manage tags
+              </button>
+            </div>
+            {tags.length === 0 ? (
+              <p className="text-xs text-slate-400">No tags to filter yet.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {tags.map((tag) => {
+                  const active = selectedTagIds.includes(tag.id);
+                  const style = getTagBadgeStyle(tag.color);
+                  return (
+                    <button
+                      key={tag.id}
+                      type="button"
+                      onClick={() => handleTagToggle(tag.id)}
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition ${
+                        active ? 'shadow-[0_0_0_1px_rgba(59,130,246,0.5)]' : 'border-transparent'
+                      }`}
+                      style={style}
+                      aria-pressed={active}
+                    >
+                      {tag.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
-        {tagFilter != null && (
-          <div className="mt-3 flex items-center gap-3 text-xs uppercase">
-            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-3 py-1 font-semibold text-emerald-100">
-              Tag: {tags.find((tag) => tag.id === tagFilter)?.name ?? 'Unknown'}
-            </span>
-            <button
-              type="button"
-              onClick={() => setTagFilter(null)}
-              className="text-[11px] font-medium text-slate-300 underline hover:text-white"
-            >
-              Clear
-            </button>
+
+        {hasActiveFilters && (
+          <div className="mt-4 border-t border-slate-800 pt-4">
+            <div className="flex flex-wrap items-center gap-2 text-xs uppercase">
+              <span className="font-semibold text-slate-300">Active filters:</span>
+              {hasSearchFilter && (
+                <span className="flex items-center gap-1 rounded-full border border-fuchsia-500/40 bg-fuchsia-500/20 px-3 py-1 text-fuchsia-100">
+                  Search: {searchQueryDisplay}
+                  <button
+                    type="button"
+                    onClick={clearSearchFilter}
+                    className="text-[10px] font-semibold uppercase text-fuchsia-200 hover:text-fuchsia-100"
+                  >
+                    Clear
+                  </button>
+                </span>
+              )}
+              {hasPriorityFilter && (
+                <span className="flex items-center gap-1 rounded-full border border-blue-500/40 bg-blue-500/20 px-3 py-1 text-blue-100">
+                  Priority: {selectedPriority.toUpperCase()}
+                  <button
+                    type="button"
+                    onClick={clearPriorityFilter}
+                    className="text-[10px] font-semibold uppercase text-blue-200 hover:text-blue-100"
+                  >
+                    Clear
+                  </button>
+                </span>
+              )}
+              {selectedTagIds.map((tagId) => {
+                const tag = tags.find((entry) => entry.id === tagId);
+                if (!tag) {
+                  return null;
+                }
+                const style = getTagBadgeStyle(tag.color);
+                return (
+                  <span
+                    key={tagId}
+                    className="flex items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-wide"
+                    style={style}
+                  >
+                    {tag.name}
+                    <button
+                      type="button"
+                      onClick={() => handleTagToggle(tagId)}
+                      className="text-[10px] font-semibold uppercase"
+                      aria-label={`Remove tag filter ${tag.name}`}
+                    >
+                      Remove
+                    </button>
+                  </span>
+                );
+              })}
+              <button
+                type="button"
+                onClick={clearAllFilters}
+                className="ml-auto text-[11px] font-medium text-slate-300 underline hover:text-white"
+              >
+                Clear all
+              </button>
+            </div>
           </div>
         )}
       </section>
+
+      {hasActiveFilters && !uiState.loading && filteredTodos.length === 0 && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-300">
+          No todos match your current filters. Try adjusting your search or clearing filters.
+        </div>
+      )}
 
       <section className="flex flex-col gap-8">
         <TodoSection
@@ -1260,8 +2020,9 @@ export default function TodoPage() {
           onToggle={handleToggle}
           onEdit={openEdit}
           onDelete={handleDelete}
-          onTagClick={handleTagFilterToggle}
-          activeTagId={tagFilter}
+          onSaveTemplate={openSaveTemplateModal}
+          onTagToggle={handleTagToggle}
+          activeTagIds={selectedTagIds}
           subtaskDrafts={subtaskInputs}
           subtaskErrors={subtaskErrors}
           subtaskEditDrafts={subtaskEditDrafts}
@@ -1287,8 +2048,9 @@ export default function TodoPage() {
           onToggle={handleToggle}
           onEdit={openEdit}
           onDelete={handleDelete}
-          onTagClick={handleTagFilterToggle}
-          activeTagId={tagFilter}
+          onSaveTemplate={openSaveTemplateModal}
+          onTagToggle={handleTagToggle}
+          activeTagIds={selectedTagIds}
           subtaskDrafts={subtaskInputs}
           subtaskErrors={subtaskErrors}
           subtaskEditDrafts={subtaskEditDrafts}
@@ -1314,8 +2076,9 @@ export default function TodoPage() {
           onToggle={handleToggle}
           onEdit={openEdit}
           onDelete={handleDelete}
-          onTagClick={handleTagFilterToggle}
-          activeTagId={tagFilter}
+          onSaveTemplate={openSaveTemplateModal}
+          onTagToggle={handleTagToggle}
+          activeTagIds={selectedTagIds}
           subtaskDrafts={subtaskInputs}
           subtaskErrors={subtaskErrors}
           subtaskEditDrafts={subtaskEditDrafts}
@@ -1334,6 +2097,470 @@ export default function TodoPage() {
           onDeleteSubtask={handleDeleteSubtask}
         />
       </section>
+
+      {isTemplateModalOpen && (
+        <dialog open className="fixed inset-0 flex items-center justify-center bg-black/60 p-4">
+          <form
+            className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl"
+            onSubmit={handleTemplateSubmit}
+          >
+            <header className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold">
+                  {templateModalMode === 'edit' ? 'Edit Template' : 'Save as Template'}
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Templates capture todo details, tags, and subtasks for quick reuse.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeTemplateModal}
+                className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:border-blue-500 hover:text-blue-200"
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <label className="flex flex-col gap-2 text-sm">
+                Template name
+                <input
+                  value={templateForm.name}
+                  onChange={(event) => updateTemplateFormState({ name: event.target.value })}
+                  maxLength={80}
+                  required
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm">
+                Category <span className="text-xs text-slate-500">Optional</span>
+                <input
+                  value={templateForm.category}
+                  onChange={(event) => updateTemplateFormState({ category: event.target.value })}
+                  maxLength={40}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  placeholder="Work, Personal, Finance…"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm md:col-span-2">
+                Description <span className="text-xs text-slate-500">Optional</span>
+                <textarea
+                  value={templateForm.description}
+                  onChange={(event) => updateTemplateFormState({ description: event.target.value })}
+                  maxLength={500}
+                  className="min-h-[60px] rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  placeholder="Explain when to use this template."
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm md:col-span-2">
+                Todo title
+                <input
+                  value={templateForm.todoTitle}
+                  onChange={(event) => updateTemplateFormState({ todoTitle: event.target.value })}
+                  maxLength={200}
+                  required
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm md:col-span-2">
+                Todo description <span className="text-xs text-slate-500">Optional</span>
+                <textarea
+                  value={templateForm.todoDescription}
+                  onChange={(event) => updateTemplateFormState({ todoDescription: event.target.value })}
+                  maxLength={2000}
+                  className="min-h-[80px] rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm">
+                Priority
+                <select
+                  value={templateForm.priority}
+                  onChange={(event) => updateTemplateFormState({ priority: event.target.value as Priority })}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                >
+                  {priorityOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={templateForm.isRecurring}
+                  onChange={(event) => handleTemplateRecurringToggle(event.target.checked)}
+                />
+                Recurring todo
+              </label>
+              {templateForm.isRecurring && (
+                <label className="flex flex-col gap-2 text-sm">
+                  Recurrence pattern
+                  <select
+                    value={templateForm.recurrencePattern}
+                    onChange={(event) => updateTemplateFormState({ recurrencePattern: event.target.value as RecurrencePattern })}
+                    className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  >
+                    {recurrenceOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option.toUpperCase()}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label className="flex flex-col gap-2 text-sm">
+                Reminder
+                <select
+                  value={templateForm.reminderMinutes}
+                  onChange={(event) => updateTemplateFormState({ reminderMinutes: event.target.value })}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                >
+                  <option value="">No reminder</option>
+                  {reminderOptions.map((minutes) => (
+                    <option key={minutes} value={minutes}>
+                      {minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`} before
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-2 text-sm">
+                Due offset (days)
+                <input
+                  type="number"
+                  min={0}
+                  value={templateForm.dueOffsetDays}
+                  onChange={(event) => updateTemplateFormState({ dueOffsetDays: event.target.value })}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                />
+              </label>
+            </div>
+
+            <div className="mt-5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-200">Tags</h3>
+                <span className="text-xs text-slate-400">{templateForm.tagIds.length} selected</span>
+              </div>
+              {tags.length === 0 ? (
+                <p className="mt-2 text-xs text-slate-400">No tags yet. Create tags to attach them to templates.</p>
+              ) : (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {tags.map((tag) => {
+                    const checked = templateForm.tagIds.includes(tag.id);
+                    return (
+                      <label
+                        key={tag.id}
+                        className={`flex items-center gap-2 rounded border px-2 py-1 text-xs transition ${
+                          checked
+                            ? 'border-blue-500 bg-blue-500/20 text-blue-100'
+                            : 'border-slate-700 bg-slate-950/40 text-slate-200 hover:border-blue-500'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleTemplateTagSelection(tag.id)}
+                          className="accent-blue-500"
+                        />
+                        <span className="flex items-center gap-1">
+                          <span
+                            className="h-3 w-3 rounded-full border border-slate-800"
+                            style={{ backgroundColor: tag.color }}
+                          />
+                          {tag.name}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 rounded border border-slate-800 bg-slate-950/40 p-4">
+              <h3 className="text-sm font-semibold text-slate-200">Subtasks snapshot</h3>
+              {templateSubtasksPreview.length === 0 ? (
+                <p className="mt-2 text-xs text-slate-400">No subtasks captured for this template.</p>
+              ) : (
+                <ul className="mt-3 flex max-h-40 flex-col gap-2 overflow-y-auto">
+                  {templateSubtasksPreview.map((subtask) => (
+                    <li key={`${subtask.position}-${subtask.title}`} className="rounded border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-200">
+                      <span className="font-semibold text-slate-300">{subtask.position}.</span> {subtask.title}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {templateFormError && <p className="mt-4 text-sm text-red-400">{templateFormError}</p>}
+
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeTemplateModal}
+                className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:border-blue-500 hover:text-blue-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={templateSubmitting}
+                className="rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-900"
+              >
+                {templateSubmitting
+                  ? 'Saving…'
+                  : templateModalMode === 'edit'
+                    ? 'Save changes'
+                    : 'Save template'}
+              </button>
+            </div>
+          </form>
+        </dialog>
+      )}
+
+      {isTemplateManagerOpen && (
+        <dialog open className="fixed inset-0 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-3xl rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl">
+            <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-xl font-semibold">Template Library</h2>
+                <p className="text-xs text-slate-400">Search, edit, and launch templates grouped by category.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="search"
+                  value={templateSearch}
+                  onChange={(event) => setTemplateSearch(event.target.value)}
+                  placeholder="Search templates"
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                />
+                <button
+                  type="button"
+                  onClick={() => setTemplateManagerOpen(false)}
+                  className="rounded border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-blue-500 hover:text-blue-200"
+                >
+                  Close
+                </button>
+              </div>
+            </header>
+
+            {templateManagerError && <p className="mt-4 text-sm text-red-400">{templateManagerError}</p>}
+
+            {templatesLoading ? (
+              <p className="mt-6 text-sm text-slate-400">Loading templates…</p>
+            ) : filteredTemplates.length === 0 ? (
+              <p className="mt-6 text-sm text-slate-400">No templates found. Save a todo as a template to get started.</p>
+            ) : (
+              <div className="mt-6 flex flex-col gap-6">
+                {templatesByCategory.map(([category, entries]) => (
+                  <section key={category} className="rounded border border-slate-800 bg-slate-950/40 p-4">
+                    <header className="flex items-center justify-between">
+                      <h3 className="text-sm font-semibold text-slate-200">{category}</h3>
+                      <span className="text-xs text-slate-400">{entries.length} template{entries.length === 1 ? '' : 's'}</span>
+                    </header>
+                    <ul className="mt-4 flex flex-col gap-3">
+                      {entries.map((template) => (
+                        <li
+                          key={template.id}
+                          className="rounded border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-200"
+                        >
+                          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                            <div className="flex-1">
+                              <p className="text-base font-semibold text-slate-100">{template.name}</p>
+                              {template.description && (
+                                <p className="text-xs text-slate-400">{template.description}</p>
+                              )}
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] uppercase text-slate-400">
+                                <PriorityBadge priority={template.priority} />
+                                {template.recurrencePattern && (
+                                  <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-200">
+                                    Repeats {template.recurrencePattern.toUpperCase()}
+                                  </span>
+                                )}
+                                {template.reminderMinutes != null && (
+                                  <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">
+                                    Reminder {template.reminderMinutes}m
+                                  </span>
+                                )}
+                                <span className="rounded border border-slate-700 px-2 py-1">
+                                  Offset {template.dueOffsetDays}d
+                                </span>
+                                <span className="rounded border border-slate-700 px-2 py-1">
+                                  {template.tagIds.length} tag{template.tagIds.length === 1 ? '' : 's'}
+                                </span>
+                                <span className="rounded border border-slate-700 px-2 py-1">
+                                  {template.subtasks.length} subtask{template.subtasks.length === 1 ? '' : 's'}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => openTemplateUseModal(template.id)}
+                                className="rounded border border-green-600 px-3 py-1 text-xs text-green-200 hover:bg-green-600/20"
+                              >
+                                Use
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openEditTemplateModal(template)}
+                                className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:border-blue-500 hover:text-blue-200"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => requestDeleteTemplate(template)}
+                                className="rounded border border-red-600 px-3 py-1 text-xs text-red-200 hover:border-red-500/80"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ))}
+              </div>
+            )}
+
+            {templateDeleteTarget && (
+              <div className="mt-6 rounded border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+                <p>
+                  Delete template <strong>{templateDeleteTarget.name}</strong>? Existing todos created from it will not be affected.
+                </p>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={cancelDeleteTemplate}
+                    className="rounded border border-amber-500 px-3 py-1 text-xs text-amber-200 hover:bg-amber-500/10"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmDeleteTemplate}
+                    className="rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-500"
+                  >
+                    Delete template
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </dialog>
+      )}
+
+      {isTemplateUseModalOpen && (
+        <dialog open className="fixed inset-0 flex items-center justify-center bg-black/60 p-4">
+          <form
+            className="w-full max-w-xl rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl"
+            onSubmit={handleTemplateUseSubmit}
+          >
+            <header className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold">Use Template</h2>
+                <p className="text-xs text-slate-400">Select a template and optionally adjust due date or offset.</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeTemplateUseModal}
+                className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:border-blue-500 hover:text-blue-200"
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="mt-4 flex flex-col gap-3">
+              <label className="flex flex-col gap-2 text-sm">
+                Template
+                <select
+                  value={templateUseTargetId ?? ''}
+                  onChange={(event) => setTemplateUseTargetId(event.target.value ? Number.parseInt(event.target.value, 10) : null)}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                >
+                  {templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.category ? `${template.name} (${template.category})` : template.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-2 text-sm">
+                Due date (overrides offset)
+                <input
+                  type="datetime-local"
+                  value={templateUseDueDate}
+                  onChange={(event) => setTemplateUseDueDate(event.target.value)}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm">
+                Due offset (days)
+                <input
+                  type="number"
+                  min={0}
+                  value={templateUseOffset}
+                  onChange={(event) => setTemplateUseOffset(event.target.value)}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                />
+              </label>
+            </div>
+
+            {selectedTemplateForUse && (
+              <div className="mt-5 rounded border border-slate-800 bg-slate-950/40 p-4 text-xs text-slate-300">
+                <p className="text-sm font-semibold text-slate-200">Preview</p>
+                <p className="mt-1 text-slate-300">{selectedTemplateForUse.todoTitle}</p>
+                {selectedTemplateForUse.todoDescription && (
+                  <p className="mt-1 text-slate-400">{selectedTemplateForUse.todoDescription}</p>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2 text-[11px] uppercase text-slate-400">
+                  <PriorityBadge priority={selectedTemplateForUse.priority} />
+                  {selectedTemplateForUse.recurrencePattern && (
+                    <span className="rounded border border-blue-500/40 px-2 py-1 text-blue-200">
+                      Repeats {selectedTemplateForUse.recurrencePattern.toUpperCase()}
+                    </span>
+                  )}
+                  {selectedTemplateForUse.reminderMinutes != null && (
+                    <span className="rounded border border-amber-500/40 px-2 py-1 text-amber-200">
+                      Reminder {selectedTemplateForUse.reminderMinutes}m
+                    </span>
+                  )}
+                  <span className="rounded border border-slate-700 px-2 py-1">
+                    Offset {selectedTemplateForUse.dueOffsetDays}d
+                  </span>
+                  <span className="rounded border border-slate-700 px-2 py-1">
+                    {selectedTemplateForUse.tagIds.length} tag{selectedTemplateForUse.tagIds.length === 1 ? '' : 's'}
+                  </span>
+                  <span className="rounded border border-slate-700 px-2 py-1">
+                    {selectedTemplateForUse.subtasks.length} subtask{selectedTemplateForUse.subtasks.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {templateUseError && <p className="mt-4 text-sm text-red-400">{templateUseError}</p>}
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeTemplateUseModal}
+                className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:border-blue-500 hover:text-blue-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={templateUseSubmitting}
+                className="rounded bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:bg-green-900"
+              >
+                {templateUseSubmitting ? 'Creating…' : 'Create Todo'}
+              </button>
+            </div>
+          </form>
+        </dialog>
+      )}
 
       {isTagModalOpen && (
         <dialog open className="fixed inset-0 flex items-center justify-center bg-black/60 p-4">
@@ -1648,8 +2875,9 @@ interface TodoSectionProps {
   onToggle: (todo: Todo) => void;
   onEdit: (todo: Todo) => void;
   onDelete: (todo: Todo) => void;
-  onTagClick: (tagId: number) => void;
-  activeTagId: number | null;
+  onSaveTemplate: (todo: Todo) => void;
+  onTagToggle: (tagId: number) => void;
+  activeTagIds: number[];
   subtaskDrafts: Record<number, string>;
   subtaskErrors: Record<number, string | null>;
   subtaskEditDrafts: Record<number, string>;
@@ -1676,8 +2904,9 @@ function TodoSection({
   onToggle,
   onEdit,
   onDelete,
-  onTagClick,
-  activeTagId,
+  onSaveTemplate,
+  onTagToggle,
+  activeTagIds,
   subtaskDrafts,
   subtaskErrors,
   subtaskEditDrafts,
@@ -1743,13 +2972,13 @@ function TodoSection({
                       {todo.tags.length > 0 && (
                         <div className="mt-3 flex flex-wrap gap-2">
                           {todo.tags.map((tag) => {
-                            const active = activeTagId === tag.id;
+                            const active = activeTagIds.includes(tag.id);
                             const style = getTagBadgeStyle(tag.color);
                             return (
                               <button
                                 key={tag.id}
                                 type="button"
-                                onClick={() => onTagClick(tag.id)}
+                                onClick={() => onTagToggle(tag.id)}
                                 className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide transition ${
                                   active ? 'shadow-[0_0_0_1px_rgba(52,211,153,0.5)]' : 'border-transparent'
                                 }`}
@@ -1765,6 +2994,12 @@ function TodoSection({
                     </div>
                   </label>
                   <div className="flex flex-col gap-2">
+                    <button
+                      className="rounded border border-blue-600 px-3 py-1 text-xs text-blue-200 hover:bg-blue-600/20"
+                      onClick={() => onSaveTemplate(todo)}
+                    >
+                      Save template
+                    </button>
                     <button
                       className="rounded border border-slate-700 px-3 py-1 text-xs"
                       onClick={() => onEdit(todo)}

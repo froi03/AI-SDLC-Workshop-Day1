@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { DateTime } from 'luxon';
 import { getSession } from '@/lib/auth';
 import { db, tagDB, todoDB, type Priority, type RecurrencePattern, type Todo } from '@/lib/db';
 import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
@@ -13,13 +14,32 @@ function validateRecurrence(pattern: unknown): pattern is RecurrencePattern {
   return pattern === 'daily' || pattern === 'weekly' || pattern === 'monthly' || pattern === 'yearly';
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const todos = todoDB.listByUser(session.userId);
+  const monthParam = request.nextUrl.searchParams.get('month');
+  let todos: Todo[];
+
+  if (monthParam) {
+    const parsedMonth = DateTime.fromFormat(monthParam, 'yyyy-LL', { zone: 'Asia/Singapore' }).startOf('month');
+    if (!parsedMonth.isValid) {
+      return NextResponse.json({ error: 'Invalid month parameter' }, { status: 400 });
+    }
+
+    const rangeStart = parsedMonth.toUTC().toISO();
+    const rangeEnd = parsedMonth.plus({ months: 1 }).toUTC().toISO();
+    if (!rangeStart || !rangeEnd) {
+      return NextResponse.json({ error: 'Failed to derive month boundaries' }, { status: 400 });
+    }
+
+    todos = todoDB.listByDueDateRange(session.userId, rangeStart, rangeEnd);
+  } else {
+    todos = todoDB.listByUser(session.userId);
+  }
+
   return NextResponse.json({ todos });
 }
 
@@ -152,7 +172,7 @@ export async function POST(request: NextRequest) {
     }
 
     return { todo: created };
-  })();
+  });
 
   return NextResponse.json(result, { status: 201 });
 }

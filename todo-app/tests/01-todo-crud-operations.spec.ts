@@ -198,7 +198,6 @@ test.describe('Todo CRUD operations', () => {
 
     todoDB.delete(todo.id, TEST_USER_ID);
 
-    // remove from cleanup list so afterEach does not double-delete
     const index = createdTodoIds.indexOf(todo.id);
     if (index >= 0) {
       createdTodoIds.splice(index, 1);
