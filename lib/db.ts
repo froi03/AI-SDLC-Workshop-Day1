@@ -88,7 +88,7 @@ function ensureUserTable() {
     );
   `);
 
-  const columns = db.prepare<{ name: string }>(`PRAGMA table_info('users')`).all() as { name: string }[];
+  const columns = db.prepare(`PRAGMA table_info('users')`).all() as { name: string }[];
   const columnNames = new Set(columns.map((column) => column.name));
 
   if (!columnNames.has('display_name')) {
@@ -142,15 +142,15 @@ function ensureAuthenticatorTables() {
 
 function ensureTodoConstraints() {
   const tableSqlRow = db
-    .prepare<{ sql: string } | undefined>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'todos'")
-    .get();
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'todos'")
+    .get() as { sql: string } | undefined;
 
   if (!tableSqlRow) {
     return;
   }
 
   const tableSql = tableSqlRow.sql ?? '';
-  const columnInfo = db.prepare<{ name: string }>(`PRAGMA table_info('todos')`).all() as { name: string }[];
+  const columnInfo = db.prepare(`PRAGMA table_info('todos')`).all() as { name: string }[];
   const hasLastNotificationColumn = columnInfo.some((column) => column.name === 'last_notification_sent');
 
   const needsPriorityCheck = !tableSql.includes("CHECK (priority IN ('high','medium','low'))");
@@ -611,11 +611,11 @@ const insertUserStmt = db.prepare(`
   ) VALUES (?, ?, NULL, NULL, ?, ?)
 `);
 
-const selectUserByEmailStmt = db.prepare<UserRow | undefined>(
+const selectUserByEmailStmt = db.prepare<[string], UserRow>(
   `SELECT * FROM users WHERE email = ? COLLATE NOCASE`
 );
 
-const selectUserByIdStmt = db.prepare<UserRow | undefined>(`SELECT * FROM users WHERE id = ?`);
+const selectUserByIdStmt = db.prepare<[number], UserRow>(`SELECT * FROM users WHERE id = ?`);
 
 const updateUserChallengeStmt = db.prepare(`
   UPDATE users
@@ -631,11 +631,11 @@ const clearUserChallengeStmt = db.prepare(`
   WHERE id = ?
 `);
 
-const selectAuthenticatorsByUserStmt = db.prepare<AuthenticatorRow[]>(
+const selectAuthenticatorsByUserStmt = db.prepare<[number], AuthenticatorRow>(
   `SELECT * FROM authenticators WHERE user_id = ? ORDER BY id ASC`
 );
 
-const selectAuthenticatorByCredentialStmt = db.prepare<AuthenticatorRow | undefined>(
+const selectAuthenticatorByCredentialStmt = db.prepare<[string, number], AuthenticatorRow>(
   `SELECT * FROM authenticators WHERE credential_id = ? AND user_id = ?`
 );
 
@@ -1048,7 +1048,7 @@ function ensureTemplateRow(id: number, userId: number): TemplateRow {
   return row;
 }
 
-const selectTodos = db.prepare<TodoRow[]>(`
+const selectTodos = db.prepare<[number], TodoRow>(`
   SELECT *
   FROM todos
   WHERE user_id = ?
@@ -1060,9 +1060,9 @@ const selectTodos = db.prepare<TodoRow[]>(`
     created_at ASC
 `);
 
-const selectTodoById = db.prepare<TodoRow | undefined>(`SELECT * FROM todos WHERE id = ? AND user_id = ?`);
+const selectTodoById = db.prepare<[number, number], TodoRow>(`SELECT * FROM todos WHERE id = ? AND user_id = ?`);
 
-const selectReminderCandidates = db.prepare<TodoRow[]>(`
+const selectReminderCandidates = db.prepare<[number], TodoRow>(`
   SELECT *
   FROM todos
   WHERE user_id = ?
@@ -1071,7 +1071,7 @@ const selectReminderCandidates = db.prepare<TodoRow[]>(`
     AND is_completed = 0
 `);
 
-const selectTodosInDueRangeStmt = db.prepare<TodoRow[]>(`
+const selectTodosInDueRangeStmt = db.prepare<[number, string, string], TodoRow>(`
   SELECT *
   FROM todos
   WHERE user_id = ?
@@ -1121,14 +1121,14 @@ const markNotificationSentStmt = db.prepare(`
   WHERE id = ? AND user_id = ?
 `);
 
-const selectSubtasksByTodoStmt = db.prepare<SubtaskRow[]>(`
+const selectSubtasksByTodoStmt = db.prepare<[number], SubtaskRow>(`
   SELECT id, todo_id, title, position, is_completed, created_at, updated_at
   FROM subtasks
   WHERE todo_id = ?
   ORDER BY position ASC, id ASC
 `);
 
-const selectSubtasksForUserStmt = db.prepare<SubtaskRow[]>(`
+const selectSubtasksForUserStmt = db.prepare<[number], SubtaskRow>(`
   SELECT
     s.id,
     s.todo_id,
@@ -1143,7 +1143,7 @@ const selectSubtasksForUserStmt = db.prepare<SubtaskRow[]>(`
   ORDER BY s.todo_id ASC, s.position ASC, s.id ASC
 `);
 
-const selectProgressForTodoStmt = db.prepare<{ total: number; completed: number }>(`
+const selectProgressForTodoStmt = db.prepare<[number, number], { total: number; completed: number }>(`
   SELECT
     COUNT(*) AS total,
     SUM(CASE WHEN s.is_completed = 1 THEN 1 ELSE 0 END) AS completed
@@ -1152,7 +1152,7 @@ const selectProgressForTodoStmt = db.prepare<{ total: number; completed: number 
   WHERE s.todo_id = ? AND t.user_id = ?
 `);
 
-const selectSubtaskByIdWithUserStmt = db.prepare<SubtaskJoinRow | undefined>(`
+const selectSubtaskByIdWithUserStmt = db.prepare<[number], SubtaskJoinRow>(`
   SELECT
     s.id,
     s.todo_id,
@@ -1197,13 +1197,13 @@ const updateSubtaskPositionStmt = db.prepare(`
 
 const deleteSubtaskStmt = db.prepare(`DELETE FROM subtasks WHERE id = ?`);
 
-const selectTagsByUserStmt = db.prepare<TagRow[]>(
+const selectTagsByUserStmt = db.prepare<[number], TagRow>(
   `SELECT * FROM tags WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC`
 );
 
 type TagWithCountRow = TagRow & { todo_count: number };
 
-const selectTagsWithCountsStmt = db.prepare<TagWithCountRow[]>(`
+const selectTagsWithCountsStmt = db.prepare<[number], TagWithCountRow>(`
   SELECT
     t.id,
     t.user_id,
@@ -1220,7 +1220,7 @@ const selectTagsWithCountsStmt = db.prepare<TagWithCountRow[]>(`
   ORDER BY t.name COLLATE NOCASE ASC
 `);
 
-const selectTagByIdStmt = db.prepare<TagRow | undefined>(
+const selectTagByIdStmt = db.prepare<[number, number], TagRow>(
   `SELECT * FROM tags WHERE id = ? AND user_id = ?`
 );
 
@@ -1241,7 +1241,7 @@ const updateTagStmt = db.prepare(`
 
 const deleteTagStmt = db.prepare(`DELETE FROM tags WHERE id = ? AND user_id = ?`);
 
-const selectTagsForTodoStmt = db.prepare<TagRow[]>(`
+const selectTagsForTodoStmt = db.prepare<[number, number], TagRow>(`
   SELECT t.id, t.user_id, t.name, t.color, t.description, t.created_at, t.updated_at
   FROM todo_tags tt
   INNER JOIN tags t ON t.id = tt.tag_id
@@ -1249,7 +1249,7 @@ const selectTagsForTodoStmt = db.prepare<TagRow[]>(`
   ORDER BY t.name COLLATE NOCASE ASC
 `);
 
-const selectTodoTagsByUserStmt = db.prepare<TodoTagRow[]>(`
+const selectTodoTagsByUserStmt = db.prepare<[number], TodoTagRow>(`
   SELECT
     tt.todo_id,
     t.id,
@@ -1276,15 +1276,15 @@ const upsertHolidayStmt = db.prepare(`
     updated_at = excluded.updated_at
 `);
 
-const selectAllHolidaysStmt = db.prepare<HolidayRow[]>(
+const selectAllHolidaysStmt = db.prepare<[], HolidayRow>(
   `SELECT id, date, name, created_at, updated_at FROM holidays ORDER BY date ASC`
 );
 
-const selectHolidaysInRangeStmt = db.prepare<HolidayRow[]>(
+const selectHolidaysInRangeStmt = db.prepare<[string, string], HolidayRow>(
   `SELECT id, date, name, created_at, updated_at FROM holidays WHERE date >= ? AND date < ? ORDER BY date ASC`
 );
 
-const selectTemplatesByUserStmt = db.prepare<TemplateRow[]>(`
+const selectTemplatesByUserStmt = db.prepare<[number], TemplateRow>(`
   SELECT
     id,
     user_id,
@@ -1310,11 +1310,11 @@ const selectTemplatesByUserStmt = db.prepare<TemplateRow[]>(`
     name COLLATE NOCASE ASC
 `);
 
-const selectTemplateByIdStmt = db.prepare<TemplateRow | undefined>(
+const selectTemplateByIdStmt = db.prepare<[number, number], TemplateRow>(
   `SELECT * FROM templates WHERE id = ? AND user_id = ?`
 );
 
-const selectTemplateByNameStmt = db.prepare<TemplateRow | undefined>(
+const selectTemplateByNameStmt = db.prepare<[number, string], TemplateRow>(
   `SELECT * FROM templates WHERE user_id = ? AND name = ? COLLATE NOCASE`
 );
 
