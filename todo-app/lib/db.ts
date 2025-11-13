@@ -759,9 +759,16 @@ export const todoDB = {
     updateTodoStmt.run({
       id,
       user_id: userId,
+      title: null,
+      description: null,
+      priority: null,
+      due_date: null,
       is_completed: isCompleted ? 1 : 0,
       completed_at: isCompleted ? now : '__NULL__',
-      last_notification_sent: null,
+      is_recurring: null,
+      recurrence_pattern: null,
+      reminder_minutes: null,
+      last_notification_sent: '__NULL__',
       updated_at: now
     });
 
