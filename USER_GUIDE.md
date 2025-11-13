@@ -83,235 +83,43 @@ Organize todos by importance with three priority levels, each with distinct colo
 - Change priority by editing the todo
 - Filter todos by priority using the priority filter dropdown
 
-### Visual Indicators
-- Each priority level has unique color-coded badges
-- Badge appears next to todo title in all views
-- Colors adapt automatically in dark mode
-- Overdue section maintains priority badges
+## 10. Search & Filtering
 
----
+### Overview
+- Combine free-text search, priority chips, and tag chips to narrow the dashboard without refetching data.
 
-## 4. Due Dates & Time Management
+### Search Input
+- Sits directly below the todo creation form inside the filter card.
+- Placeholder text: "Search todos...".
+- 300 ms debounce keeps typing responsive, even with large lists.
+- Trims whitespace and matches in a case-insensitive way.
+- Searches todo titles, descriptions, and tag names.
+- Clearing the field immediately removes the search constraint.
 
-### What It Does
-Set specific date and time deadlines for your todos with intelligent time-based displays.
+### Priority Filter
+- Pill buttons for All, High, Medium, and Low priorities.
+- Only one priority can be active; selecting "All" resets the priority filter.
+- Works together with search and tag filters (AND logic).
 
-### How to Use
-1. Click the **date-time picker** when creating/editing a todo
-2. Select date and time (must be in the future)
-3. The system enforces **Singapore timezone**
-4. Leave blank if no due date needed
+### Tag Filter
+- Tag pills reuse the tag colour palette and support multi-select toggling.
+- Selected tags use AND logic: todos must include every chosen tag.
+- If a tag is deleted, it is automatically removed from the active selection.
 
-### Smart Time Display
+### Active Filter Summary
+- Appears beneath the controls when any filter is active.
+- Shows chips for the search query, selected priority, and each active tag.
+- Each chip exposes a small "Clear" button; "Clear all" resets every filter at once.
+- Clicking a tag chip on a todo toggles that tag within the active selection.
 
-The app shows different formats based on urgency:
+### Empty Results
+- When filters hide every todo, a message card explains that nothing matches and suggests relaxing the filters.
+- Section counts (Overdue, Active, Completed) still reflect the filtered subsets.
 
-| Time Until Due | Display Format | Color |
-|----------------|----------------|-------|
-| Overdue | "X days/hours/minutes overdue" | 🔴 Red |
-| < 1 hour | "Due in X minutes" | 🔴 Red |
-| < 24 hours | "Due in X hours (timestamp)" | 🟠 Orange |
-| < 7 days | "Due in X days (timestamp)" | 🟡 Yellow |
-| 7+ days | Full timestamp | 🔵 Blue |
-
-### Overdue Tracking
-- Overdue todos appear in a separate **"Overdue"** section with red background
-- Warning icon (⚠️) highlights overdue items
-- Counter shows total overdue items: "Overdue (X)"
-- Automatic calculation based on Singapore time
-- Updates in real-time
-
----
-
-## 5. Recurring Todos
-
-### What It Does
-Automatically create repeating tasks on a schedule (daily, weekly, monthly, or yearly).
-
-### How to Use
-1. Check the **"Repeat"** checkbox when creating a todo
-2. Select recurrence pattern from dropdown:
-   - **Daily**: Repeats every day
-   - **Weekly**: Repeats every 7 days
-   - **Monthly**: Repeats on the same date next month
-   - **Yearly**: Repeats annually
-3. **Set a due date** (required for recurring todos)
-4. When you complete the recurring todo, a new instance is automatically created for the next occurrence
-
-### Visual Indicators
-- Recurring todos display a **🔄 badge** with the pattern (e.g., "🔄 weekly")
-- Purple badge with border in light mode
-- Adapted colors for dark mode visibility
-
-### How It Works
-- Next occurrence maintains the same settings:
-  - Same priority level
-  - Same reminder timing
-  - Same recurrence pattern
-  - Same tags (if any)
-- Due date automatically calculated based on pattern
-- New instance only created when current one is marked complete
-
-### Use Cases
-- Daily habits (exercise, medication)
-- Weekly meetings or reports
-- Monthly bill payments
-- Yearly reviews or renewals
-
----
-
-## 6. Reminders & Notifications
-
-### What It Does
-Receive browser notifications before your todos are due to stay on top of deadlines.
-
-### How to Enable
-1. Click **"🔔 Enable Notifications"** button (orange, top-right)
-2. Grant browser notification permission when prompted
-3. Once enabled, button shows **"🔔 Notifications On"** (green badge)
-
-### Setting Reminders
-
-When creating or editing a todo with a due date:
-
-1. Use the **"Reminder"** dropdown
-2. Select timing:
-   - 15 minutes before
-   - 30 minutes before
-   - 1 hour before
-   - 2 hours before
-   - 1 day before
-   - 2 days before
-   - 1 week before
-3. Select "None" to remove reminder
-
-### Requirements
-- ⚠️ Todo must have a due date
-- ⚠️ Reminder field disabled if no due date set
-- ⚠️ Browser must support notifications
-- ⚠️ Permission must be granted
-
-### Visual Indicators
-Todos with reminders show a **🔔 badge** with abbreviated time:
-- `🔔 15m` - 15 minutes
-- `🔔 30m` - 30 minutes
-- `🔔 1h` - 1 hour
-- `🔔 2h` - 2 hours
-- `🔔 1d` - 1 day
-- `🔔 2d` - 2 days
-- `🔔 1w` - 1 week
-
-### How It Works
-- System checks every minute for pending reminders
-- Notification sent when reminder time arrives
-- Each reminder only sent once (tracked via `last_notification_sent`)
-- Notifications persist until acknowledged
-- Works even if browser tab is in background
-
----
-
-## 7. Subtasks & Checklists
-
-### What It Does
-Break down complex todos into smaller, manageable subtasks with real-time progress tracking.
-
-### How to Use
-
-#### Creating Subtasks
-1. Click **"▶ Subtasks"** button on any todo to expand
-2. Enter subtask title in the input field
-3. Press **Enter** or click **"Add"** to create
-4. Repeat for additional subtasks
-
-#### Managing Subtasks
-- **Complete**: Click checkbox next to subtask
-- **Uncomplete**: Click checked checkbox to mark incomplete
-- **Rename**: Click **"Rename"** to edit the title inline
-- **Delete**: Click **"Delete"** on the right side of the subtask
-- **Collapse**: Click **"▼ Subtasks"** to hide subtask list
-
-### Progress Tracking
-
-#### Visual Progress Bar
-- Shows completion percentage (0-100%)
-- Blue progress bar updates in real-time
-- Rendered inside the expanded subtasks panel
-- Accessible via ARIA attributes for screen readers
-
-#### Text Indicator
-- Format: `"X/Y · Z%"`
-- Displayed on the Subtasks toggle button even when collapsed
-- Example: `"3/7 · 43%"` (rounded to nearest whole percent)
-
-### Features
-- ✅ Unlimited subtasks per todo
-- ✅ Subtasks maintain their order (position-based)
-- ✅ Included in search functionality
-- ✅ CASCADE delete (all subtasks removed when parent deleted)
-- ✅ Independent completion (subtask completion doesn't affect parent)
-- ✅ Real-time progress updates
-
-### Use Cases
-- Multi-step projects
-- Meeting agendas with action items
-- Shopping lists
-- Recipe steps
-- Onboarding checklists
-- Project milestones
-
----
-
-## 8. Tags & Categories
-
-### What It Does
-Organize todos with custom color-coded labels for better categorization and filtering.
-
-### Managing Tags
-
-#### Creating Tags
-1. Click **"Manage tags"** (available beside the tag picker or filters)
-2. In the modal form:
-  - Enter a name (1-50 chars, unique per user)
-  - Pick a color via the color well or enter a hex code
-  - (Optional) Add a short description (≤200 chars)
-3. Click **"Create tag"**
-4. The new tag appears immediately in the list and in tag pickers
-
-#### Editing Tags
-1. Open the tag management modal
-2. Click **"Edit"** beside the tag you want to adjust
-3. Update name, color, and/or description
-4. Click **"Save changes"**
-5. Todos refresh automatically with the new tag styling
-
-#### Deleting Tags
-1. Open the tag management modal
-2. Click **"Delete"** next to a tag
-3. Confirm in the inline warning (shows how many todos use the tag)
-4. Tag is removed from all todos instantly
-
-### Using Tags on Todos
-
-#### When Creating Todos
-1. Open the **Tags** section in the create form
-2. Use the checkboxes beside each colored tag chip to select/deselect
-3. Selected tags highlight with a blue border/background, unselected stay neutral
-4. Multiple tags can be applied to the same todo
-
-#### When Editing Todos
-1. Click **"Edit"** on a todo card
-2. Use the tag checkboxes inside the modal to adjust associations
-3. Save changes; the todo refetches with updated badges
-
-### Filtering by Tags
-1. In the filter panel, click any tag chip to toggle it on/off
-2. Active tag filters display a highlight and appear in the filter summary
-3. Tag filters combine with existing priority filters seamlessly
-4. Use the **Clear** link or click the active chip again to reset
-
-### Visual Display
-- Tags render as clickable colored pills after priority/reminder badges
-- Text color auto-adjusts for contrast; background uses the tag color
+### Behaviour Notes
+- Filters always combine with AND logic across search, priority, and tags.
+- Newly created or updated todos are re-evaluated immediately against the current filters.
+- All filtering happens client side; API calls only refresh the base todo list.
 - Hover/focus states show subtle outlines for accessibility
 - Available in every section (Overdue, Active, Completed)
 
@@ -350,15 +158,18 @@ Save frequently used todo patterns as reusable templates for instant creation of
    - **Name**: Template identifier (required)
    - **Description**: Purpose/details (optional)
    - **Category**: Group similar templates (optional)
+  - **Due offset**: Default due date offset in days (optional)
 4. Click **"Save Template"**
 5. Template saved to your library
 
+> Tags and subtasks from the source todo are captured automatically.
+
 ### Using Templates
 
-#### Quick Use from Dropdown
-1. In todo form, find **"Use Template"** dropdown
-2. Select a template from the list
-3. Todo created **instantly** with template settings
+#### Quick Use from Button
+1. In todo form, click the **"Use Template"** button
+2. Choose a template from the modal and adjust due date or offset if desired
+3. Confirm to create the todo instantly with template settings
 4. Templates show category in parentheses if set
    - Example: `"Weekly Review (Work)"`
 
@@ -405,11 +216,12 @@ Templates preserve:
 - ✅ Reminder timing (minutes before due)
 - ✅ Category information
 - ✅ Description
+- ✅ Attached tags (by reference)
+- ✅ Subtasks (titles and positions)
 
 **Note**: Templates do NOT include:
 - ❌ Specific due dates (you set when creating)
-- ❌ Tags (selected when creating from template)
-- ❌ Subtasks (added after creation)
+- ❌ Estimated duration (coming soon)
 
 ### Template Categories
 
