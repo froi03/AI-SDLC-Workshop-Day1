@@ -23,6 +23,7 @@ const TEMPLATE_DESCRIPTION_MAX_LENGTH = 500;
 const TEMPLATE_TODO_TITLE_MAX_LENGTH = 200;
 const TEMPLATE_TODO_DESCRIPTION_MAX_LENGTH = 2000;
 const FALLBACK_TAG_COLOR = '#3B82F6';
+const AUTHENTICATOR_TRANSPORTS = new Set(['ble', 'cable', 'hybrid', 'internal', 'nfc', 'smart-card', 'usb']);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -736,7 +737,9 @@ export const authenticatorDB = {
   upsert(input: { userId: number; credentialId: string; publicKey: string; counter: number; transports: string[] }): Authenticator {
     const now = singaporeUtcIso();
     const transports = Array.isArray(input.transports)
-      ? input.transports.filter((value): value is string => typeof value === 'string')
+      ? input.transports.filter(
+          (value): value is string => typeof value === 'string' && AUTHENTICATOR_TRANSPORTS.has(value)
+        )
       : [];
     const transportsJson = JSON.stringify(Array.from(new Set(transports)));
 
@@ -1488,9 +1491,16 @@ export const todoDB = {
     updateTodoStmt.run({
       id,
       user_id: userId,
+      title: null,
+      description: null,
+      priority: null,
+      due_date: null,
       is_completed: isCompleted ? 1 : 0,
       completed_at: isCompleted ? now : '__NULL__',
-      last_notification_sent: null,
+      is_recurring: null,
+      recurrence_pattern: null,
+  reminder_minutes: null,
+  last_notification_sent: '__NULL__',
       updated_at: now
     });
 
