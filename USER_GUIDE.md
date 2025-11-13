@@ -13,110 +13,41 @@
 10. [Search & Advanced Filtering](#10-search--advanced-filtering)
 11. [Export & Import](#11-export--import)
 12. [Calendar View](#12-calendar-view)
-13. [Managing Todos](#13-managing-todos)
-14. [Dark Mode](#14-dark-mode)
-15. [Tips & Best Practices](#tips--best-practices)
-16. [Troubleshooting](#troubleshooting)
-
----
-
-## 1. Authentication
-
 ### What It Does
-The app uses modern **WebAuthn/Passkeys** authentication for secure, passwordless access to your todos.
+- Presents todos in a Singapore-timezone monthly grid so you can spot busy days and public holidays.
+- Lets you drill into a single day, review details, and update completion without leaving the calendar.
 
-### How to Use
-- **Register**: Enter a username and use your device's biometric authentication (fingerprint, face ID) or security key
-- **Login**: Select your username and authenticate with your passkey
-- **Logout**: Click the "Logout" button in the top-right corner
+### Opening The Calendar
+- Use the global header link labelled `Calendar` (present on every page).
+- The page loads the current month automatically and syncs the `?month=YYYY-MM` query string so deep links work.
+- Click `Back to dashboard` in the header to return to the main todo list.
 
-### Benefits
-- ✅ No passwords to remember
-- ✅ More secure than traditional passwords
-- ✅ Works across devices with passkey sync
-- ✅ Uses Singapore timezone for all date/time operations
+### Month Navigation
+- Buttons for `◀ Previous`, `Today`, and `Next ▶` adjust the visible month, always snapping to the first day of the month.
+- `Today` jumps straight to the current Singapore month and highlights the current date with a blue outline.
+- Keyboard shortcut: press `Esc` to close the detail dialog for the selected day.
 
----
+### Day Grid Overview
+- Week starts on Monday; non-month days are dimmed and weekends have a darker tint.
+- Each cell shows the day number, an optional badge with the number of todos, up to three todo previews, and a `+n more…` indicator when needed.
+- Public holidays are surfaced as emerald chips inside the cell; data comes from the synced `holidays` table.
+- Color-coded priority badges (red/yellow/blue) match the dashboard styling for immediate context.
 
-## 2. Creating Todos
+### Day Detail Dialog
+- Click any day to open a modal with the full todo list and holiday badges for that date.
+- From the dialog you can mark todos complete/incomplete; the calendar refreshes instantly to reflect the change.
+- `Open in dashboard` provides a quick jump back to the main list for deeper editing.
+- Close via the `Close` button or the `Esc` key; the modal clears automatically when you navigate to another month.
 
-### What It Does
-Create tasks with titles, due dates, priorities, and additional features.
+### Data Refresh & Reliability
+- The calendar fetches todos and holidays for the selected month via `/api/todos?month=` and `/api/holidays?month=`.
+- Requests always run in `Asia/Singapore`; invalid responses show a red inline error banner and clear the grid.
+- Spinners are minimal: a subdued `Loading calendar…` message appears while fresh data is requested.
 
-### How to Use
-1. Enter your todo title in the main input field
-2. Select a priority level (High/Medium/Low)
-3. Optionally set a due date and time
-4. Click **"Add"** to create the todo
-
-### Key Features
-- Todos are automatically sorted by priority and due date
-- All dates/times use **Singapore timezone**
-- Minimum due date is 1 minute in the future
-- Title is required (cannot be empty or whitespace)
-
-### Form Location
-Found at the top of the main page with:
-- Text input for title
-- Priority dropdown
-- Date-time picker
-- Add button
-
----
-
-## 3. Priority Levels
-
-### What It Does
-Organize todos by importance with three priority levels, each with distinct color coding.
-
-### Priority Types
-
-| Priority | Color | Use Case |
-|----------|-------|----------|
-| **High** | 🔴 Red | Urgent, critical tasks |
-| **Medium** | 🟡 Yellow | Standard tasks (default) |
-| **Low** | 🔵 Blue | Less urgent tasks |
-
-### How to Use
-- Select priority when creating a todo using the dropdown menu
-- Todos are automatically sorted with high priority tasks appearing first
-- Change priority by editing the todo
-- Filter todos by priority using the priority filter dropdown
-
-## 10. Search & Filtering
-
-### Overview
-- Combine free-text search, priority chips, and tag chips to narrow the dashboard without refetching data.
-
-### Search Input
-- Sits directly below the todo creation form inside the filter card.
-- Placeholder text: "Search todos...".
-- 300 ms debounce keeps typing responsive, even with large lists.
-- Trims whitespace and matches in a case-insensitive way.
-- Searches todo titles, descriptions, and tag names.
-- Clearing the field immediately removes the search constraint.
-
-### Priority Filter
-- Pill buttons for All, High, Medium, and Low priorities.
-- Only one priority can be active; selecting "All" resets the priority filter.
-- Works together with search and tag filters (AND logic).
-
-### Tag Filter
-- Tag pills reuse the tag colour palette and support multi-select toggling.
-- Selected tags use AND logic: todos must include every chosen tag.
-- If a tag is deleted, it is automatically removed from the active selection.
-
-### Active Filter Summary
-- Appears beneath the controls when any filter is active.
-- Shows chips for the search query, selected priority, and each active tag.
-- Each chip exposes a small "Clear" button; "Clear all" resets every filter at once.
-- Clicking a tag chip on a todo toggles that tag within the active selection.
-
-### Empty Results
-- When filters hide every todo, a message card explains that nothing matches and suggests relaxing the filters.
-- Section counts (Overdue, Active, Completed) still reflect the filtered subsets.
-
-### Behaviour Notes
+### Practical Tips
+- Start each week by scanning for red (high-priority) clusters to avoid overload.
+- Use holiday chips to plan around public breaks before confirming due dates.
+- If you rely on dashboard filters, revisit the main page; the calendar currently shows the full todo set for the month.
 - Filters always combine with AND logic across search, priority, and tags.
 - Newly created or updated todos are re-evaluated immediately against the current filters.
 - All filtering happens client side; API calls only refresh the base todo list.

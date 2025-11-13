@@ -58,6 +58,7 @@ ensureTodoConstraints();
 ensureTagTables();
 ensureSubtaskTables();
 ensureTemplateTables();
+ensureHolidayTables();
 
 const ensureDefaultUser = db.prepare(`
   INSERT INTO users (id, email)
@@ -244,6 +245,22 @@ function ensureTemplateTables() {
   `);
 }
 
+function ensureHolidayTables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS holidays (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_holidays_date ON holidays(date);
+  `);
+}
+
 export type Priority = 'high' | 'medium' | 'low';
 export type RecurrencePattern = 'daily' | 'weekly' | 'monthly' | 'yearly';
 
@@ -393,6 +410,14 @@ export interface Todo {
   updatedAt: string;
 }
 
+export interface Holiday {
+  id: number;
+  date: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 type TodoRow = {
   id: number;
   user_id: number;
@@ -406,6 +431,14 @@ type TodoRow = {
   recurrence_pattern: RecurrencePattern | null;
   reminder_minutes: number | null;
   last_notification_sent: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type HolidayRow = {
+  id: number;
+  date: string;
+  name: string;
   created_at: string;
   updated_at: string;
 };
@@ -591,6 +624,16 @@ function mapTodo(row: TodoRow, tags: Tag[] = [], subtasks: Subtask[] = []): Todo
   };
 }
 
+function mapHoliday(row: HolidayRow): Holiday {
+  return {
+    id: row.id,
+    date: row.date,
+    name: row.name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function singaporeUtcIso(): string {
   const iso = getSingaporeNow().toUTC().toISO();
   if (!iso) {
@@ -709,6 +752,16 @@ const selectReminderCandidates = db.prepare<TodoRow[]>(`
     AND reminder_minutes IS NOT NULL
     AND due_date IS NOT NULL
     AND is_completed = 0
+`);
+
+const selectTodosInDueRangeStmt = db.prepare<TodoRow[]>(`
+  SELECT *
+  FROM todos
+  WHERE user_id = ?
+    AND due_date IS NOT NULL
+    AND due_date >= ?
+    AND due_date < ?
+  ORDER BY due_date ASC, id ASC
 `);
 
 const insertTodo = db.prepare(`
@@ -898,6 +951,22 @@ const selectTodoTagsByUserStmt = db.prepare<TodoTagRow[]>(`
 const attachTagStmt = db.prepare(`INSERT OR IGNORE INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`);
 const detachTagStmt = db.prepare(`DELETE FROM todo_tags WHERE todo_id = ? AND tag_id = ?`);
 
+const upsertHolidayStmt = db.prepare(`
+  INSERT INTO holidays (date, name, created_at, updated_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(date) DO UPDATE SET
+    name = excluded.name,
+    updated_at = excluded.updated_at
+`);
+
+const selectAllHolidaysStmt = db.prepare<HolidayRow[]>(
+  `SELECT id, date, name, created_at, updated_at FROM holidays ORDER BY date ASC`
+);
+
+const selectHolidaysInRangeStmt = db.prepare<HolidayRow[]>(
+  `SELECT id, date, name, created_at, updated_at FROM holidays WHERE date >= ? AND date < ? ORDER BY date ASC`
+);
+
 const selectTemplatesByUserStmt = db.prepare<TemplateRow[]>(`
   SELECT
     id,
@@ -1015,6 +1084,22 @@ export const todoDB = {
     return rows.map((row) => mapTodo(row, tagMap.get(row.id) ?? [], subtaskMap.get(row.id) ?? []));
   },
 
+  listByDueDateRange(userId: number, startIso: string, endIso: string): Todo[] {
+    if (!startIso || !endIso) {
+      return [];
+    }
+
+    const rows = selectTodosInDueRangeStmt.all(userId, startIso, endIso) as TodoRow[];
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const todoIds = rows.map((row) => row.id);
+    const tagMap = collectTagsForTodos(userId, todoIds);
+    const subtaskMap = collectSubtasksForTodos(userId, todoIds);
+    return rows.map((row) => mapTodo(row, tagMap.get(row.id) ?? [], subtaskMap.get(row.id) ?? []));
+  },
+
   listReminderCandidates(userId: number): Todo[] {
     const rows = selectReminderCandidates.all(userId) as TodoRow[];
     const todoIds = rows.map((row) => row.id);
@@ -1057,9 +1142,9 @@ export const todoDB = {
       throw new Error('Todo not found after update');
     }
 
-  const tags = listTagsForTodoInternal(id, userId);
-  const subtasks = listSubtasksForTodoInternal(id, userId);
-  return mapTodo(row, tags, subtasks);
+    const tags = listTagsForTodoInternal(id, userId);
+    const subtasks = listSubtasksForTodoInternal(id, userId);
+    return mapTodo(row, tags, subtasks);
   },
 
   delete(id: number, userId: number): void {
@@ -1574,6 +1659,27 @@ function serializeTemplateSubtasks(subtasks: TemplateSubtaskDefinition[]): strin
   return JSON.stringify(ordered);
 }
 
+function normalizeHolidayDate(input: string): string {
+  const parsed = DateTime.fromISO(input, { zone: 'Asia/Singapore' });
+  if (!parsed.isValid) {
+    throw new Error('Invalid holiday date');
+  }
+
+  const iso = parsed.startOf('day').toISODate();
+  if (!iso) {
+    throw new Error('Failed to normalize holiday date');
+  }
+  return iso;
+}
+
+function normalizeHolidayName(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error('Holiday name is required');
+  }
+  return trimmed;
+}
+
 function toUtcIso(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -1799,6 +1905,39 @@ export const tagDB = {
       rows.push(row);
     }
     return rows.map(mapTag);
+  }
+};
+
+export const holidayDB = {
+  listAll(): Holiday[] {
+    const rows = selectAllHolidaysStmt.all() as HolidayRow[];
+    return rows.map(mapHoliday);
+  },
+
+  listByDateRange(startDate: string, endDate: string): Holiday[] {
+    if (!startDate || !endDate) {
+      return [];
+    }
+
+    const rows = selectHolidaysInRangeStmt.all(startDate, endDate) as HolidayRow[];
+    return rows.map(mapHoliday);
+  },
+
+  upsertMany(entries: { date: string; name: string }[]): void {
+    if (entries.length === 0) {
+      return;
+    }
+
+    const run = db.transaction((items: { date: string; name: string }[]) => {
+      for (const item of items) {
+        const date = normalizeHolidayDate(item.date);
+        const name = normalizeHolidayName(item.name);
+        const timestamp = singaporeUtcIso();
+        upsertHolidayStmt.run(date, name, timestamp, timestamp);
+      }
+    });
+
+    run(entries);
   }
 };
 
