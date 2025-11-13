@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { todoDB, type Priority, type RecurrencePattern } from '@/lib/db';
+import { db, tagDB, todoDB, type Priority, type RecurrencePattern, type Todo } from '@/lib/db';
 import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
 
 const REMINDER_OPTIONS = new Set([15, 30, 60, 120, 1440, 2880, 10080]);
@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
   }
 
-  let { title, description, priority, dueDate, isRecurring, recurrencePattern, reminderMinutes } = body as {
+  let { title, description, priority, dueDate, isRecurring, recurrencePattern, reminderMinutes, tagIds } = body as {
     title?: unknown;
     description?: unknown;
     priority?: unknown;
@@ -42,6 +42,7 @@ export async function POST(request: NextRequest) {
     isRecurring?: unknown;
     recurrencePattern?: unknown;
     reminderMinutes?: unknown;
+    tagIds?: unknown;
   };
 
   if (typeof title !== 'string' || title.trim().length === 0) {
@@ -114,16 +115,44 @@ export async function POST(request: NextRequest) {
 
   const finalReminder = (reminderMinutes as number | null) ?? null;
 
-  const todo = todoDB.create({
-    userId: session.userId,
-    title: title as string,
-    description: finalDescription,
-    priority: finalPriority,
-    dueDate: finalDueDate,
-    isRecurring: finalIsRecurring,
-    recurrencePattern: finalRecurrencePattern,
-    reminderMinutes: finalReminder
+  let finalTagIds: number[] = [];
+  if (tagIds != null) {
+    if (!Array.isArray(tagIds)) {
+      return NextResponse.json({ error: 'tagIds must be an array of numbers' }, { status: 400 });
+    }
+    const parsed = tagIds
+      .map((value) => (typeof value === 'number' ? value : Number.parseInt(String(value), 10)))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    if (parsed.length !== tagIds.length) {
+      return NextResponse.json({ error: 'tagIds must be an array of numbers' }, { status: 400 });
+    }
+    finalTagIds = Array.from(new Set(parsed));
+    try {
+      tagDB.ensureOwned(session.userId, finalTagIds);
+    } catch (error) {
+      return NextResponse.json({ error: (error as Error).message }, { status: 404 });
+    }
+  }
+
+  const result = db.transaction(() => {
+    const created = todoDB.create({
+      userId: session.userId,
+      title: title as string,
+      description: finalDescription,
+      priority: finalPriority,
+      dueDate: finalDueDate,
+      isRecurring: finalIsRecurring,
+      recurrencePattern: finalRecurrencePattern,
+      reminderMinutes: finalReminder
+    });
+
+    if (finalTagIds.length > 0) {
+      const tags = tagDB.attachMany(created.id, finalTagIds, session.userId);
+      return { todo: { ...created, tags } as Todo };
+    }
+
+    return { todo: created };
   });
 
-  return NextResponse.json({ todo }, { status: 201 });
+  return NextResponse.json(result, { status: 201 });
 }

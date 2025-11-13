@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
-import { db, todoDB, type Priority, type RecurrencePattern, type Todo } from '@/lib/db';
+import { db, tagDB, todoDB, type Priority, type RecurrencePattern, type Todo } from '@/lib/db';
 import { getSingaporeNow, isFutureSingaporeDate, parseSingaporeDate } from '@/lib/timezone';
 import { getNextRecurrenceDueDate } from '@/lib/recurrence';
 
@@ -211,7 +211,10 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
       reminderMinutes: updatedTodo.reminderMinutes
     });
 
-    return { updatedTodo, nextTodo };
+    const tagIdsToCopy = updatedTodo.tags.map((tag) => tag.id);
+    const tagsForNext = tagIdsToCopy.length > 0 ? tagDB.attachMany(nextTodo.id, tagIdsToCopy, session.userId) : [];
+
+    return { updatedTodo, nextTodo: { ...nextTodo, tags: tagsForNext } };
   });
 
   const { updatedTodo: updated, nextTodo } = applyUpdate();

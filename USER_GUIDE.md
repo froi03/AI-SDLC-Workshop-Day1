@@ -268,59 +268,51 @@ Organize todos with custom color-coded labels for better categorization and filt
 ### Managing Tags
 
 #### Creating Tags
-1. Click **"+ Manage Tags"** button (near todo form)
-2. In the modal:
-   - Enter tag name in text field
-   - Select color using color picker or enter hex code
-   - Click **"Create Tag"**
-3. Tag appears in your tag list immediately
+1. Click **"Manage tags"** (available beside the tag picker or filters)
+2. In the modal form:
+  - Enter a name (1-50 chars, unique per user)
+  - Pick a color via the color well or enter a hex code
+  - (Optional) Add a short description (≤200 chars)
+3. Click **"Create tag"**
+4. The new tag appears immediately in the list and in tag pickers
 
 #### Editing Tags
-1. Open tag management modal
-2. Click **"Edit"** button next to any tag
-3. Modify name and/or color
-4. Click **"Update"**
-5. Changes reflect on all todos using that tag
+1. Open the tag management modal
+2. Click **"Edit"** beside the tag you want to adjust
+3. Update name, color, and/or description
+4. Click **"Save changes"**
+5. Todos refresh automatically with the new tag styling
 
 #### Deleting Tags
-1. Open tag management modal
-2. Click **"Delete"** button next to tag
-3. Confirm deletion
-4. Tag removed from all todos (CASCADE delete)
+1. Open the tag management modal
+2. Click **"Delete"** next to a tag
+3. Confirm in the inline warning (shows how many todos use the tag)
+4. Tag is removed from all todos instantly
 
 ### Using Tags on Todos
 
 #### When Creating Todos
-1. View tags section below todo form (if tags exist)
-2. Click tag pills to select/deselect
-3. Selected tags show:
-   - ✓ Checkmark
-   - Colored background
-   - White text
-4. Unselected tags show:
-   - No checkmark
-   - White/gray background
-   - Gray border
-5. Multiple tags can be selected
+1. Open the **Tags** section in the create form
+2. Use the checkboxes beside each colored tag chip to select/deselect
+3. Selected tags highlight with a blue border/background, unselected stay neutral
+4. Multiple tags can be applied to the same todo
 
 #### When Editing Todos
-1. Click **"Edit"** on a todo
-2. Tag selection appears in edit modal
-3. Toggle tags on/off
-4. Click **"Update"** to save
+1. Click **"Edit"** on a todo card
+2. Use the tag checkboxes inside the modal to adjust associations
+3. Save changes; the todo refetches with updated badges
 
 ### Filtering by Tags
-1. Use **"All Tags"** dropdown in filter section
-2. Select a tag to show only todos with that tag
-3. Tag filter combines with other filters (search, priority, dates)
-4. Select "All Tags" to clear tag filter
+1. In the filter panel, click any tag chip to toggle it on/off
+2. Active tag filters display a highlight and appear in the filter summary
+3. Tag filters combine with existing priority filters seamlessly
+4. Use the **Clear** link or click the active chip again to reset
 
 ### Visual Display
-- Tags appear as **colored pills** on todos
-- Tag names in **white text** on colored background
-- Rounded full shape for visual appeal
-- Positioned after priority and recurrence badges
-- Visible in all sections (Overdue, Pending, Completed)
+- Tags render as clickable colored pills after priority/reminder badges
+- Text color auto-adjusts for contrast; background uses the tag color
+- Hover/focus states show subtle outlines for accessibility
+- Available in every section (Overdue, Active, Completed)
 
 ### Tag Features
 - 🔐 User-specific (each user has their own tags)
